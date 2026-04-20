@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import uuid4
 
+from . import dials
 from .events import bus
 from .models import Chat, Message, RunState
 
@@ -50,6 +51,44 @@ def contains_forbidden(text: str) -> str | None:
     """Return the offending substring if any, else None."""
     m = FORBIDDEN_RE.search(text or "")
     return m.group(0) if m else None
+
+
+# Phrases the model keeps reaching for even though they violate world rules:
+# - Phone-fiction excuses for blocked sends (platform always works)
+# - Meeting proposals (agents cannot meet in person, only chat)
+# If any of these appear in outgoing text, the send is refused and the
+# activation ends — the model must rewrite without them, or not send.
+_BLOCKED_PHRASES_PHONE = [
+    "non vedo la chat", "non vedo più la chat",
+    "chat sparita", "chat è sparita", "chat è spari",
+    "ho perso i messaggi", "ho perso la cronologia",
+    "fa le bizze", "fanno le bizze",
+    "problemi tecnici", "problemi al telefono",
+    "cronologia persa", "si è piallata",
+]
+_BLOCKED_PHRASES_MEETING = [
+    "passa da me", "passa da te",
+    "passo da te", "passo da me",
+    "ci vediamo", "vediamoci",
+    "ti aspetto", "ti aspettiamo",
+    "arrivo subito", "scendo da te", "scendo subito",
+    "vieni da me", "ti raggiungo",
+    "prendiamo un caffè", "facciamo un caffè", "un caffè insieme",
+    "un caffè veloce", "caffè da me", "caffè da te",
+    "ci sentiamo di persona", "parliamone di persona",
+]
+
+
+def _content_rule_violation(text: str) -> tuple[str, str] | None:
+    """Return (category, matched phrase) if text violates a world rule."""
+    low = (text or "").lower()
+    for p in _BLOCKED_PHRASES_PHONE:
+        if p in low:
+            return ("phone_fiction", p)
+    for p in _BLOCKED_PHRASES_MEETING:
+        if p in low:
+            return ("meeting", p)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +343,7 @@ def _resolve_chat(state: RunState, ref: str, current_agent_id: str | None = None
     return None
 
 
-PER_DM_DAILY_HARD_CAP = 4  # max messages per DM chat per agent per day
+PER_DM_DAILY_HARD_CAP = 2  # max messages per DM chat per agent per day
 
 
 def _tokens(s: str) -> set[str]:
@@ -516,18 +555,38 @@ def tool_send_message(ctx: ToolContext, chat_id: str, text: str) -> str:
     if hit is not None:
         ctx.blocked_sends.append({"chat_id": chat_id, "text": text, "hit": hit})
         return "Messaggio non inviato: prova a riscriverlo più breve, parlando come faresti normalmente in chat di condominio."
+    rule = _content_rule_violation(text)
+    if rule is not None:
+        category, phrase = rule
+        ctx.done = True
+        if category == "phone_fiction":
+            return (
+                f"Non mandare questo messaggio: contiene \"{phrase}\", che è una bugia "
+                f"(le chat funzionano sempre). Metti giù il telefono."
+            )
+        return (
+            f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
+            f"di persona — solo chat. Metti giù il telefono."
+        )
     if _would_be_consecutive_dm(state, chat, ctx.agent_id):
         return (
             f"Hai già scritto l'ultimo messaggio in questa chat privata e "
-            f"non ti hanno ancora risposto. Aspetta una risposta prima di "
-            f"scrivere di nuovo."
+            f"non ti hanno ancora risposto. Non mandare un altro messaggio qui — "
+            f"se hai altro da fare altrove, fallo; altrimenti metti giù il telefono."
         )
     if _is_near_duplicate(state, chat.id, ctx.agent_id, text):
-        return "Hai appena scritto qualcosa di molto simile in questa chat, non lo rimando. Se vuoi aggiungere qualcosa di diverso, riscrivilo; altrimenti lascia stare."
+        ctx.done = True
+        return "Hai appena scritto qualcosa di molto simile. Non riformulare, non inventare scuse — metti giù il telefono."
     if chat.kind == "dm" and _chat_message_count_today(state, chat.id, ctx.agent_id) >= PER_DM_DAILY_HARD_CAP:
-        return "Hai già scritto parecchio in questa chat oggi. Lasciala respirare, scrivi domani."
+        return (
+            "Hai già scritto parecchio in questa chat privata oggi, lasciala respirare. "
+            "Se hai altro da dire altrove fallo, altrimenti metti giù il telefono."
+        )
 
     msg = _create_and_append_message(ctx, chat, ctx.agent_id, text)
+    # Trust signal: attack-by-name in a main/group chat (public attacks only).
+    if chat.kind in ("main", "group", "assembly"):
+        dials.on_message_attack(state, ctx.agent_id, text)
     return f"Inviato in {chat.display_name} alle {_format_time_it(msg.fictional_timestamp_minutes, state.fictional_start_iso)}."
 
 
@@ -572,18 +631,43 @@ def tool_send_dm(ctx: ToolContext, recipient_id: str, text: str) -> str:
     if hit is not None:
         ctx.blocked_sends.append({"chat_id": dm_chat.id, "text": text, "hit": hit})
         return "Messaggio non inviato: prova a riscriverlo più breve, parlando come faresti normalmente in chat di condominio."
+    rule = _content_rule_violation(text)
+    if rule is not None:
+        category, phrase = rule
+        ctx.done = True
+        if category == "phone_fiction":
+            return (
+                f"Non mandare questo messaggio: contiene \"{phrase}\", che è una bugia "
+                f"(le chat funzionano sempre). Metti giù il telefono."
+            )
+        return (
+            f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
+            f"di persona — solo chat. Metti giù il telefono."
+        )
     if _would_be_consecutive_dm(state, dm_chat, ctx.agent_id):
         return (
             f"Hai già scritto l'ultimo messaggio a {_display_for(state, recipient_id)} "
-            f"e non ti hanno ancora risposto. Aspetta una risposta prima di "
-            f"scrivere di nuovo."
+            f"e non ti hanno ancora risposto. Non scrivergli di nuovo ora — se hai altro "
+            f"da fare altrove, fallo; altrimenti metti giù il telefono."
         )
     if _is_near_duplicate(state, dm_chat.id, ctx.agent_id, text):
-        return "Hai appena scritto qualcosa di molto simile a questa persona, non lo rimando. Se vuoi aggiungere qualcosa di diverso, riscrivilo; altrimenti lascia stare."
+        ctx.done = True
+        return "Hai appena scritto qualcosa di molto simile a questa persona. Non riformulare, non inventare scuse — metti giù il telefono."
     if _chat_message_count_today(state, dm_chat.id, ctx.agent_id) >= PER_DM_DAILY_HARD_CAP:
-        return "Hai già scritto parecchio a questa persona oggi. Lasciale rispondere, riprovi domani."
+        return (
+            f"Hai già scritto parecchio a {_display_for(state, recipient_id)} oggi, "
+            f"lasciale rispondere. Se hai altro da fare altrove fallo, altrimenti metti "
+            f"giù il telefono."
+        )
+
+    # Detect reply-to-partner BEFORE the send: if the current last message in
+    # this DM is from the recipient, this send closes the turn → +trust.
+    last = _last_message_in_chat(state, dm_chat.id)
+    is_reply_to_partner = last is not None and last.sender_id == recipient_id
 
     msg = _create_and_append_message(ctx, dm_chat, ctx.agent_id, text)
+    if is_reply_to_partner:
+        dials.on_dm_reply(state, ctx.agent_id, recipient_id)
     return f"Inviato a {_display_for(state, recipient_id)} alle {_format_time_it(msg.fictional_timestamp_minutes, state.fictional_start_iso)}."
 
 
@@ -802,6 +886,8 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
         "message": fmsg.model_dump(),
         "chat": target_chat.model_dump(),
     })
+    # Trust signal: forwarding a resident's message = "worth sharing" → +
+    dials.on_forward(state, ctx.agent_id, orig.sender_id)
     return f"Inoltrato in {target_chat.display_name}."
 
 
@@ -830,6 +916,8 @@ def tool_react_to_message(ctx: ToolContext, chat: str, message_excerpt: str, emo
         "agent_id": ctx.agent_id,
         "reactions": msg.reactions,
     })
+    # Trust signal: positive/negative emoji on another resident's message
+    dials.on_reaction(state, ctx.agent_id, msg, emoji)
     return f"Reazione {emoji} aggiunta."
 
 

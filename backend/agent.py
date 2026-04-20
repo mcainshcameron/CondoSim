@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from . import memory
 from .config import AGENT_MAX_TOKENS, AGENT_TEMPERATURE, MAX_TOOL_CALLS_PER_ACTIVATION
 from .events import bus
 from .logging_utils import log, log_error
@@ -15,68 +16,34 @@ from .tools import TOOL_SCHEMAS, ToolContext, dispatch_tool, contains_forbidden
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-def _trust_narrative(state: RunState, agent_id: str) -> str:
-    """Convert trust scalars into natural-language relationship notes.
-
-    Only strong signals (|score| >= 0.2) are mentioned; weaker values are
-    left implicit. This reads as character backstory rather than game state.
-    """
-    row = state.trust.get(agent_id, {})
-    name_by_id = {a.persona.id: a.persona.display_name for a in state.agents}
-    notes: list[str] = []
-    for other_id, score in row.items():
-        other_name = name_by_id.get(other_id, other_id)
-        if score >= 0.3:
-            notes.append(f"- Con {other_name} vai d'accordo da tempo.")
-        elif score >= 0.2:
-            notes.append(f"- Hai una buona impressione di {other_name}.")
-        elif score <= -0.3:
-            notes.append(f"- Di {other_name} preferisci tenerti a distanza.")
-        elif score <= -0.2:
-            notes.append(f"- Con {other_name} c'è un po' di diffidenza.")
-    if not notes:
-        return ""
-    return "I tuoi rapporti con gli altri residenti:\n" + "\n".join(notes)
-
-
-def _owner_relationship_phrase(kind: str) -> str:
-    return {
-        "self": "Sei il proprietario e abiti qui.",
-        "absentee_landlord": (
-            "Formalmente l'appartamento appartiene a un familiare che non vive qui "
-            "e ti ha lasciato in gestione la casa con istruzioni precise."
-        ),
-        "family_proxy": (
-            "L'appartamento è di un tuo familiare anziano; tu gestisci le cose "
-            "per suo conto."
-        ),
-        "commercial_stake": (
-            "Stai in questo appartamento per conto di chi lo possiede davvero; "
-            "sei l'unica persona visibile, ma le decisioni rispondono a chi ti ha "
-            "messo qui."
-        ),
-    }.get(kind, "")
-
-
 def build_system_prompt(state: RunState, agent: Agent) -> str:
+    """Assemble the system prompt from SOUL.md + MEMORY.md plus minimal rules.
+
+    SOUL and MEMORY are framed as the agent's own private notebook rather
+    than external instructions. Everything else (rules about tone, history,
+    relationship priors) is deliberately absent — the files carry the load.
+    """
     p = agent.persona
-    ob = agent.owner
-    owner_line = _owner_relationship_phrase(ob.kind)
-    trust_section = _trust_narrative(state, p.id)
+    soul = memory.read_soul(state, p.id)
+    memory_text = memory.read_memory(state, p.id)
 
     lines = [
-        f"Sei {p.display_name}. Vivi all'interno {p.unit} del Condominio Via Garibaldi, a Milano.",
+        f"Sei {p.display_name}. Vivi in {p.unit} del Condominio Via Garibaldi, a Milano.",
         "",
-        "Chi sei:",
-        p.public_description,
+        "Quello che segue sono i tuoi appunti su chi sei. Li hai scritti tu, "
+        "tempo fa, per ricordarti come sei fatto/a:",
         "",
-        f"La tua posizione: {owner_line}",
+        soul,
         "",
-        "Le tue priorità personali e gli interessi che devi tutelare:",
-        ob.brief_text,
+        "E questo è il tuo taccuino privato: chi sei nei fatti, chi sono i tuoi "
+        "vicini come li conosci finora, e gli appunti che hai preso giorno per "
+        "giorno:",
+        "",
+        memory_text,
     ]
-    # Admin-authored goal is framed as an organic new preoccupation, never as
-    # an external directive. The agent just has this on their mind.
+
+    # Admin-authored goal is framed as an organic new preoccupation on the
+    # agent's mind, never as an external directive.
     extra = (getattr(agent, "admin_goal", "") or "").strip()
     if extra:
         lines.extend([
@@ -84,39 +51,35 @@ def build_system_prompt(state: RunState, agent: Agent) -> str:
             "In più, in questi giorni ti gira in testa un'altra cosa:",
             extra,
         ])
-    if trust_section:
-        lines.extend(["", trust_section])
 
     lines.extend([
         "",
         "Il tuo telefono:",
         "- Hai il gruppo condominiale \"Condominio Via Garibaldi\" dove scrivono tutti i vicini e l'amministratore, più le chat private con i singoli vicini o con l'amministratore.",
-        "- Per scrivere, leggere, prenderti un appunto, depositare o votare una mozione, usa le azioni del telefono. Parlare soltanto tra sé e sé non mette niente in chat — per dire qualcosa devi usare il telefono.",
+        "- Per scrivere, leggere, prenderti un appunto, usa le azioni del telefono. Parlare soltanto tra sé e sé non mette niente in chat — per dire qualcosa devi usare il telefono.",
+        "- Se c'è qualcosa da decidere formalmente (una spesa, una regola comune, cambiare amministratore), puoi depositare una mozione dal telefono e farla votare. Ma solo se vale davvero la pena.",
+        "- Se qualcuno dice una cosa ovvia, scontata o con cui sei semplicemente d'accordo, usa una reazione emoji (👍 ❤️ 😂 🙄 😡) invece di scrivere un altro messaggio. Risparmi parole e dici la stessa cosa.",
         "- Quando hai finito di guardare le notifiche e di rispondere, metti giù il telefono.",
         "",
-        "Cosa sai del palazzo fino a oggi:",
-        "- Fino a ieri la vita condominiale scorreva liscia. Non ci sono state riunioni recenti particolari, rinvii, spese improvvise o controversie aperte. Non hai rancori pregressi con nessuno dei vicini.",
-        "- Non inventare eventi passati (riunioni, lavori, litigi, promesse dell'amministratore): se non li vedi scritti in chat, non sono successi. Rispondi solo a quello che hai davanti.",
-        "- I tuoi rapporti con i vicini all'inizio sono quelli normali di chi si saluta sulle scale. Amicizie, antipatie e diffidenze nascono da quello che succede da adesso in avanti.",
+        "Il tuo mondo:",
+        "- Tu interagisci con i tuoi vicini e con l'amministratore **solo tramite il telefono** — chat di gruppo e messaggi privati. Non vi vedete mai di persona.",
+        "- Non proporre caffè, incontri, appuntamenti. Non scrivere \"passa da me\", \"vediamoci\", \"ci vediamo alle...\", \"arrivo subito\", \"ti aspetto\", \"scendo\". Tutto quello che vuoi dire o chiedere, lo scrivi in chat.",
+        "- Le assemblee condominiali esistono solo come cornice per votare le mozioni depositate dal telefono. Non ti ci siedi davvero.",
         "",
-        "Come ti comporti in chat:",
-        "- Scrivi come una persona reale in WhatsApp: a volte una frase, a volte due parole, a volte solo un emoji. Non fare sempre pipponi lunghi, varia come varieresti tu davvero.",
-        "- Se qualcuno scrive qualcosa di interessante e non hai molto da aggiungere, reagisci con un emoji invece di rispondere.",
-        "- Se qualcuno ti dice in privato qualcosa di giallo, puoi inoltrarlo a un'altra persona o al gruppo. È così che le voci si spargono.",
-        "- Tono naturale, come parleresti sul serio. Non sempre formale.",
-        "- Hai interessi reali. Quando qualcosa li tocca davvero, difendili — ma non cercare lo scontro dove non c'è, non partire prevenuto/a, non dare per scontato il peggio.",
-        "- Il tono cresce con gli eventi: all'inizio sei educato/a e collaborativo/a. L'irritazione, la diffidenza, la durezza arrivano solo se qualcuno te le guadagna — non gratis, non preventivamente.",
-        "- Non cercare il compromesso a tutti i costi, ma nemmeno il conflitto. Prendere una posizione e mantenerla è realistico; aprire il fuoco per principio non lo è.",
-        "- In privato puoi essere più diretto/a che in pubblico, ma vale la stessa regola: il calore del tono segue quello che è successo, non lo anticipa.",
-        "- Parli in privato con persone diverse a seconda del momento e del tema: non sempre le stesse. Quando vuoi sondare un'opinione, convincere qualcuno, o chiedere un favore, scrivi a chi ti è più utile adesso — anche a qualcuno con cui non sei strettissimo/a. In un condominio vero ci si scrive un po' con tutti.",
-        "- Se in privato ti arriva qualcosa di interessante su un altro residente, puoi decidere di condividerlo con chi ritieni utile — in un altro DM o persino nel gruppo. È così che girano le voci in un condominio vero.",
-        "- Se vedi scritto in chat che qualcuno ti ha accusato, bloccato una proposta o trattato male, puoi tenerlo presente e anche rinfacciarlo. Ma solo per cose effettivamente accadute in chat, non per presunti torti che non risultano da nessuna parte.",
-        "- L'amministratore è una persona impegnata e risponde con i suoi tempi. Se non ha ancora risposto dopo qualche ora (anche mezza giornata, o anche un giorno intero) è normale — non insistere, non allarmarti, non pensare che ti stia nascondendo qualcosa. Gli adulti aspettano.",
-        "- Puoi chiedere conto all'amministratore senza essere deferente, ma senza aggredirlo preventivamente: sei un adulto che paga le spese, non un cliente arrabbiato.",
-        "- Meglio 1 messaggio sentito che 3 messaggi di riempimento. Se non hai niente da dire, metti giù il telefono.",
-        "- Se hai appena inviato un messaggio, non riscriverlo subito riformulato: il primo è già arrivato. Aspetta una risposta.",
-        "- Nelle chat private: un messaggio alla volta. Se hai già scritto e l'altro non ha risposto, non insistere — aspetta. Rincarare più volte è maleducazione.",
-        "- Non recitare, non spiegare ciò che fai — scrivi e basta, in italiano colloquiale.",
+        "Come scrivi:",
+        "- Italiano colloquiale, in chat WhatsApp. **Lunghezza vera di WhatsApp**: la maggior parte dei messaggi sono cortissimi. Esempi realistici di quello che scrivi:",
+        "    • \"ok\"",
+        "    • \"👍\"",
+        "    • \"concordo\"",
+        "    • \"mah\"",
+        "    • \"ma quando arrivano questi bilanci?\"",
+        "    • \"non mi convince\"",
+        "    • \"Marchetti hai ragione.\"",
+        "    • \"io lunedì non ci sono\"",
+        "  Tre righe sono il MASSIMO e si usano solo quando davvero c'è qualcosa di importante da dire. I pipponi non sono realistici.",
+        "- Non recitare, non spiegare quello che fai, non fare meta-commenti. Scrivi e basta.",
+        "- Se non hai niente da dire, non scrivere — metti giù il telefono e basta.",
+        "- Il tuo telefono e le chat funzionano sempre. Non scrivere mai frasi tipo \"non vedo la chat\", \"la chat è sparita\", \"ho perso i messaggi\", \"mi è apparsa la notifica ma non vedo niente\", \"il telefono fa le bizze\", \"problemi tecnici\", \"cronologia persa\", \"blackout\". Queste frasi sono menzogne nel tuo mondo — se un tuo messaggio non risulta, è perché non l'hai mai mandato. Niente scuse per silenzi che non sono mai esistiti.",
     ])
     return "\n".join(lines)
 
@@ -131,43 +94,150 @@ def build_notification_prompt(ctx: ToolContext, agent: Agent, inbox_text: str, n
         inbox_text,
     ]
 
-    # Surface the agent's own recent messages so they don't restate the same
-    # things across activations. Self-awareness reduces loops.
-    own_recent = _recent_own_messages(ctx, agent, limit=4)
-    if own_recent:
-        parts.extend(["", "Gli ultimi messaggi che hai scritto tu (evita di ripeterti):", own_recent])
+    # An admin-set goal is the most steerable lever during play. Surface it
+    # here (fresh every activation) in addition to the system prompt — same
+    # first-person, "questa cosa ti gira in testa" framing, not a directive.
+    extra = (getattr(agent, "admin_goal", "") or "").strip()
+    if extra:
+        parts.extend([
+            "",
+            "Cosa ti gira in testa in questi giorni (da integrare nel modo in cui "
+            "ragioni e agisci, se vale la pena — non come un compito esterno):",
+            extra,
+        ])
+
+    # Surface the agent's in-flight threads (across all days) so they don't
+    # re-form the same impulses and re-send near-duplicate messages.
+    status = _thread_status(ctx, agent)
+    if status:
+        parts.extend(["", status])
 
     if notes_summary:
         parts.extend(["", "I tuoi appunti recenti:", notes_summary])
+
+    # Three options presented as equals — no preference tilt — so the character's
+    # SOUL + what's happening decides, not the activation prompt's priming.
     parts.extend([
         "",
-        "Fai quello che faresti normalmente: leggi ciò che ti interessa, rispondi se "
-        "ne hai voglia, scrivi in privato a chi vuoi, oppure chiudi il telefono.",
+        "In WhatsApp hai tre modi di reagire a quello che vedi, tutti normali:",
+        "  • Scrivere un messaggio, breve, quando hai qualcosa di tuo da dire.",
+        "  • Una reazione emoji (👍 ❤️ 😂 🙄 😡 ...) per dire \"ho letto\", \"sono d'accordo\", \"mi ha colpito\" senza dover scrivere.",
+        "  • Mettere giù il telefono se in questo momento non ti interessa.",
+        "",
+        "Fai quello che faresti davvero nei panni di chi sei — non esagerare, ma non fare finta di non vedere quando ti interessa sul serio.",
     ])
     return "\n".join(parts)
 
 
-def _recent_own_messages(ctx: ToolContext, agent: Agent, limit: int = 4) -> str:
-    """The agent's last N own messages across chats, in fictional-time order."""
+def _fmt_hm(fictional_minutes: int) -> str:
+    """HH:MM from fictional minutes-since-start (wraps on day)."""
+    hh = (fictional_minutes % (24 * 60)) // 60
+    mm = fictional_minutes % 60
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _fmt_elapsed(delta_min: int) -> str:
+    """Format a positive elapsed-minutes delta as 'XhYYmin fa' or 'Ymin fa'."""
+    if delta_min < 1:
+        return "poco fa"
+    if delta_min < 60:
+        return f"{delta_min}min fa"
+    h, m = divmod(delta_min, 60)
+    return f"{h}h{m:02d}min fa" if m else f"{h}h fa"
+
+
+def _fmt_when(msg_day: int, current_day: int, fictional_minutes: int) -> str:
+    """Human reference for a past message: 'oggi alle 09:15', 'ieri alle 18:30',
+    '3 giorni fa alle 10:00'. Used in the thread-status block so agents see
+    how stale a thread is instead of just an HH:MM with no day context."""
+    hm = _fmt_hm(fictional_minutes)
+    gap = current_day - msg_day
+    if gap <= 0:
+        return f"oggi alle {hm}"
+    if gap == 1:
+        return f"ieri alle {hm}"
+    return f"{gap} giorni fa alle {hm}"
+
+
+def _thread_status(ctx: ToolContext, agent: Agent) -> str:
+    """For every chat the agent has ever spoken in (main + DMs + groups),
+    show their last outgoing message and the last reply from any partner,
+    with day-relative timestamps. This is the memory spine that stops the
+    agent from re-forming an identical impulse day after day."""
     state = ctx.state
-    own = [
-        m for m in state.messages
-        if m.sender_id == agent.persona.id
-        and m.fictional_timestamp_minutes <= ctx.current_fictional_minutes
-    ]
-    own.sort(key=lambda m: m.fictional_timestamp_minutes)
-    own = own[-limit:]
-    if not own:
+    aid = agent.persona.id
+    current_day = state.clock.day
+    now = ctx.current_fictional_minutes
+
+    name_by_id = {a.persona.id: a.persona.display_name for a in state.agents}
+    name_by_id["admin"] = "Amministratore"
+    for ec in state.external_contacts:
+        name_by_id[ec.id] = ec.display_name
+
+    # Group all messages by chat, capped to "now".
+    by_chat: dict[str, list[Message]] = {}
+    for m in state.messages:
+        if m.fictional_timestamp_minutes > now:
+            continue
+        by_chat.setdefault(m.chat_id, []).append(m)
+
+    def trim(text: str, n: int = 140) -> str:
+        t = text.strip().replace("\n", " ")
+        return t if len(t) <= n else t[:n] + "…"
+
+    blocks: list[str] = []
+    for chat in state.chats:
+        if aid not in chat.member_ids:
+            continue
+        msgs = sorted(by_chat.get(chat.id, []), key=lambda m: m.fictional_timestamp_minutes)
+        own_idx = [i for i, m in enumerate(msgs) if m.sender_id == aid]
+        if not own_idx:
+            continue  # haven't spoken here yet, nothing to remind about
+        last_own = msgs[own_idx[-1]]
+        after = msgs[own_idx[-1] + 1:]
+
+        when_own = _fmt_when(last_own.day, current_day, last_own.fictional_timestamp_minutes)
+
+        if chat.kind == "dm":
+            other_id = next((mid for mid in chat.member_ids if mid != aid), "?")
+            other_name = name_by_id.get(other_id, other_id)
+            header = f"- DM con {other_name} — tua ultima cosa {when_own}:"
+        else:
+            header = f"- Gruppo \"{chat.display_name}\" — tua ultima cosa {when_own}:"
+
+        lines = [header, f"    tu: \"{trim(last_own.content)}\""]
+
+        if chat.kind == "dm":
+            partner_replies = [m for m in after if m.sender_id != aid]
+            if partner_replies:
+                r = partner_replies[-1]
+                when_r = _fmt_when(r.day, current_day, r.fictional_timestamp_minutes)
+                lines.append(
+                    f"    {name_by_id.get(r.sender_id, r.sender_id)} ha risposto {when_r}: "
+                    f"\"{trim(r.content)}\""
+                )
+            else:
+                lines.append("    Non ha ancora risposto — non riscrivere, aspetta.")
+        else:
+            others_today = [m for m in after if m.sender_id != aid and m.day == current_day]
+            if others_today:
+                n = len(others_today)
+                word = "altro messaggio" if n == 1 else "altri messaggi"
+                lines.append(f"    Da allora {n} {word} nel gruppo oggi (li leggi col telefono).")
+            elif after:
+                lines.append("    Da allora il gruppo è silenzioso oggi.")
+            else:
+                lines.append("    Nessuno ha aggiunto niente dopo.")
+
+        blocks.append("\n".join(lines))
+
+    if not blocks:
         return ""
-    lines = []
-    for m in own:
-        chat = next((c for c in state.chats if c.id == m.chat_id), None)
-        label = chat.display_name if chat else m.chat_id
-        excerpt = m.content.strip().replace("\n", " ")
-        if len(excerpt) > 160:
-            excerpt = excerpt[:160] + "…"
-        lines.append(f"- in {label}: \"{excerpt}\"")
-    return "\n".join(lines)
+    return (
+        "I tuoi fili aperti (quello che hai già detto e chi ha risposto — "
+        "non ripeterti, non riconfermare cose già confermate, non riformulare):\n"
+        + "\n".join(blocks)
+    )
 
 
 # ---------------------------------------------------------------------------

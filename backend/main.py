@@ -12,13 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from . import memory
 from .config import BACKEND_PORT, FRONTEND_ORIGINS, HOST
 from .dials import apply_trust_from_votes
 from .events import bus
 from .events_pool import compute_suggestions
 from .logging_utils import log, log_error, tail_logs
 from .models import Message, Motion, RunState
-from .scenarios.heating_crisis import DEFAULT_OPENING_TEXT, build_run_state
+from .building import build_run_state
 from .scheduler import active_loop, advance_to_next_day, day_end_minutes, day_start_minutes
 from .storage import list_runs, load_run, save_run
 
@@ -117,20 +118,25 @@ def api_list_runs():
 
 
 class CreateRunPayload(BaseModel):
-    opening_text: str | None = None
+    opening_text: str
+    building_id: str = "001"
 
 
 @app.post("/api/runs")
-def api_create_run(payload: CreateRunPayload | None = None):
-    opening = (payload.opening_text if payload else None) or None
-    state = build_run_state(opening_text=opening)
+def api_create_run(payload: CreateRunPayload):
+    try:
+        state = build_run_state(building_id=payload.building_id, opening_text=payload.opening_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    memory.initialize_run_memory(state)
     save_run(state)
     return state.model_dump()
 
 
 @app.get("/api/default_opening")
 def api_default_opening():
-    return {"text": DEFAULT_OPENING_TEXT}
+    # The scenario is whatever the admin types. No canned opening.
+    return {"text": ""}
 
 
 @app.get("/api/runs/{run_id}")
@@ -261,6 +267,24 @@ def api_file_motion(run_id: str, payload: MotionPayload):
         loop.schedule_reactions(msg, depth=0, force=True)
     save_run(state)
     return {"ok": True, "motion": motion.model_dump()}
+
+
+@app.get("/api/runs/{run_id}/agents/{agent_id}/soul")
+def api_get_agent_soul(run_id: str, agent_id: str):
+    """Return the agent's immutable SOUL.md as raw markdown."""
+    state = _get_run(run_id)
+    if not any(a.persona.id == agent_id for a in state.agents):
+        raise HTTPException(status_code=404, detail="Residente non trovato")
+    return {"content": memory.read_soul(state, agent_id)}
+
+
+@app.get("/api/runs/{run_id}/agents/{agent_id}/memory")
+def api_get_agent_memory(run_id: str, agent_id: str):
+    """Return the agent's growing MEMORY.md (bio seed + day-end diary entries)."""
+    state = _get_run(run_id)
+    if not any(a.persona.id == agent_id for a in state.agents):
+        raise HTTPException(status_code=404, detail="Residente non trovato")
+    return {"content": memory.read_memory(state, agent_id)}
 
 
 @app.put("/api/runs/{run_id}/agents/{agent_id}/goal")

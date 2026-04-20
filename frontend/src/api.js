@@ -43,4 +43,8 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ goal }),
     }),
+  getAgentSoul: (id, agent_id) =>
+    req(`/api/runs/${id}/agents/${agent_id}/soul`),
+  getAgentMemory: (id, agent_id) =>
+    req(`/api/runs/${id}/agents/${agent_id}/memory`),
 };

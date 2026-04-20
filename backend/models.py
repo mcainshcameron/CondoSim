@@ -54,9 +54,13 @@ class Persona(BaseModel):
 
 
 class OwnerBrief(BaseModel):
-    """Private principal-agent instructions. Never shown to other agents."""
+    """The resident's principal-agent relationship to the unit.
+
+    Personality and stakes live in the scenario's souls/{id}.md and
+    memory_seeds/{id}.md; `kind` only drives the "Rapporto con l'appartamento"
+    line in the system prompt preamble.
+    """
     kind: OwnerKind
-    brief_text: str  # the full Italian brief fed into system prompt
 
 
 class Agent(BaseModel):
@@ -119,7 +123,7 @@ class Motion(BaseModel):
 class RunState(BaseModel):
     """The complete simulation state for a single run."""
     run_id: str
-    scenario_id: str
+    building_id: str
     started_at_iso: str
     fictional_start_iso: str  # in-world calendar anchor (Day 1 00:00)
     clock: FictionalClock = Field(default_factory=FictionalClock)

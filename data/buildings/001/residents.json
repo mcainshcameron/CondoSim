@@ -1,0 +1,67 @@
+[
+  {
+    "persona": {
+      "id": "conti",
+      "display_name": "Sig.ra Conti",
+      "unit": "2B",
+      "public_description": "Maria Conti, 72 anni, vedova, insegnante in pensione. Abita nel palazzo da quarant'anni.",
+      "responsiveness": "medium",
+      "time_of_day": "morning",
+      "millesimi": 150
+    },
+    "owner_kind": "self",
+    "starting_wallet_eur": 3400
+  },
+  {
+    "persona": {
+      "id": "ferrari",
+      "display_name": "Marco Ferrari",
+      "unit": "5A",
+      "public_description": "Marco Ferrari, 31 anni, lavora in un'azienda di consulenza. Cortese ma riservato. Si è trasferito qui tre anni fa.",
+      "responsiveness": "slow",
+      "time_of_day": "evening",
+      "millesimi": 170
+    },
+    "owner_kind": "absentee_landlord",
+    "starting_wallet_eur": 6500
+  },
+  {
+    "persona": {
+      "id": "greco",
+      "display_name": "Valentina Greco",
+      "unit": "7A",
+      "public_description": "Valentina Greco, 38 anni, si è trasferita nell'attico 7A pochi mesi fa. Lavora nella \"consulenza immobiliare\".",
+      "responsiveness": "fast",
+      "time_of_day": "scattered",
+      "millesimi": 300
+    },
+    "owner_kind": "commercial_stake",
+    "starting_wallet_eur": 18000
+  },
+  {
+    "persona": {
+      "id": "marchetti",
+      "display_name": "Davide Marchetti",
+      "unit": "3B",
+      "public_description": "Davide Marchetti, 54 anni, vive nel 3B con la madre anziana Rosa. Lavoro part-time.",
+      "responsiveness": "medium",
+      "time_of_day": "scattered",
+      "millesimi": 180
+    },
+    "owner_kind": "family_proxy",
+    "starting_wallet_eur": 2800
+  },
+  {
+    "persona": {
+      "id": "romano",
+      "display_name": "Giulia Romano",
+      "unit": "4C",
+      "public_description": "Giulia Romano, 34 anni, designer. Ha comprato il 4C con un mutuo due anni fa.",
+      "responsiveness": "fast",
+      "time_of_day": "morning",
+      "millesimi": 200
+    },
+    "owner_kind": "self",
+    "starting_wallet_eur": 4200
+  }
+]

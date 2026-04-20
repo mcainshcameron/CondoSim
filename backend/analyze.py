@@ -239,7 +239,7 @@ def motions_summary(run: dict) -> list[dict]:
 def render_report(run: dict) -> str:
     out: list[str] = []
     rid = run.get("run_id", "?")
-    scen = run.get("scenario_id", "?")
+    scen = run.get("building_id") or run.get("scenario_id", "?")
     clock = run.get("clock", {})
     n_msgs = len(run.get("messages", []))
     n_agents = len(run.get("agents", []))
@@ -344,10 +344,12 @@ def build_suggestions(run: dict, stats: dict, fm: dict) -> list[str]:
     tips: list[str] = []
     if fm["first_morning_aggression_hits"] >= 3:
         tips.append(
-            "Day-1 morning aggression is high. Audit owner `brief_text` for temperament "
-            "words (brontolon*, tagliente, impazient*, diretto al punto di irritare, "
-            "pessimist*, vittimist*). Briefs should describe *interests and constraints*, "
-            "not temperament."
+            "Day-1 morning aggression is high. Cross-check each aggressive speaker "
+            "against their SOUL in `data/buildings/{building_id}/souls/{id}.md` — if the "
+            "character trait profile explains the heat (e.g. a hot-tempered narcissist), "
+            "it's by design. If a measured character was aggressive, audit that SOUL "
+            "for mood-coloring adjectives (brontolon*, vittimist*, pessimist*) or "
+            "pre-loaded emotional states."
         )
     if fm["first_morning_prior_history_hits"] >= 2:
         tips.append(

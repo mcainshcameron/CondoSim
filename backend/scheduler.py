@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import asyncio
 
+from . import memory
 from .agent import activate_agent
 from .config import (
     CASCADE_MAX_DEPTH,
@@ -29,6 +30,7 @@ from .config import (
 from .events import bus
 from .logging_utils import log, log_error
 from .models import Message, RunState
+from .storage import save_run
 
 
 BATCH_FICTIONAL_WINDOW_MIN = 60  # pull queue items within this many fictional minutes of the head
@@ -379,11 +381,17 @@ class DayLoop:
         log("sched", f"=== DAY {day} END === activations={activated_count} total_msgs={len(self.state.messages)}")
         # End of day: clock to day_end
         self.state.clock.minutes_since_start = day_end_minutes(day)
+        # Persist BEFORE publishing day_end so any client that refetches on
+        # the event reads the up-to-date run (not the previous day's snapshot).
+        save_run(self.state)
         bus().publish(self.state.run_id, "day_end", {
             "day": day,
             "activations": activated_count,
             "total_messages": len(self.state.messages),
         })
+        # Each agent writes their end-of-day diary entry into MEMORY.md.
+        # This is what makes day N+1 feel different from day N.
+        await memory.consolidate_day(self.state, day)
 
 
 _ACTIVE_LOOPS: dict[str, DayLoop] = {}

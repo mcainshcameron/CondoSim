@@ -34,7 +34,7 @@ PER_AGENT_DAILY_SOFT_BUDGET = 5  # messages past this get deprioritized
 MAX_TOOL_CALLS_PER_ACTIVATION = 4  # hard cap on an agent's single wake-up
 CASCADE_MAX_DEPTH = 2  # bounds recursive reaction cascades
 AGENT_TEMPERATURE = 0.85
-AGENT_MAX_TOKENS = 500
+AGENT_MAX_TOKENS = 180
 
 # Logging
 VERBOSE_LOGGING = True  # prints per-activation traces to stderr

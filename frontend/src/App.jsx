@@ -15,11 +15,44 @@ function formatItalianDateTime(fictionalStartIso, minutesSinceStart) {
   return `${giorni[day]} ${dt.getDate()} ${mesi[dt.getMonth()]}, ${hh}:${mm}`;
 }
 
+// Deterministic pleasing color from any string (for avatar backgrounds).
+function colorFor(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return `hsl(${hue}, 42%, 48%)`;
+}
+
+function initialsOf(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function Avatar({ id, name, size = 36, title }) {
+  return (
+    <div
+      className="avatar"
+      style={{
+        width: size,
+        height: size,
+        background: colorFor(id || name || '?'),
+        fontSize: Math.round(size * 0.4),
+      }}
+      title={title || name}
+    >
+      {initialsOf(name)}
+    </div>
+  );
+}
+
 function Setup({ onCreated }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [existing, setExisting] = useState([]);
   const [openingText, setOpeningText] = useState('');
+  const [showRuns, setShowRuns] = useState(false);
 
   useEffect(() => {
     api.listRuns().then(r => setExisting(r.runs || [])).catch(() => {});
@@ -50,37 +83,118 @@ function Setup({ onCreated }) {
     }
   };
 
+  // Atmospheric cast preview — hardcoded names match the v1 scenario (heating_crisis).
+  const castPreview = [
+    { id: 'conti',     name: 'Maria Conti',       sub: 'int. 2B · vedova, 40 anni qui' },
+    { id: 'ferrari',   name: 'Marco Ferrari',     sub: 'int. 5A · consulente, spesso altrove' },
+    { id: 'greco',     name: 'Valentina Greco',   sub: 'int. 7A · "consulente immobiliare"' },
+    { id: 'marchetti', name: 'Davide Marchetti',  sub: 'int. 3B · cura la madre anziana' },
+    { id: 'romano',    name: 'Giulia Romano',     sub: 'int. 4C · designer, appena comprato' },
+  ];
+
   return (
-    <div className="setup">
-      <h1>Condominio Via Garibaldi</h1>
-      <p>
-        Sei l'amministratore. Scegli il messaggio di apertura che vuoi inviare
-        al gruppo principale — puoi cambiarlo completamente, raccontare la crisi
-        che vuoi tu, e da lì guidare la conversazione.
-      </p>
-      <textarea
-        className="setup-textarea"
-        value={openingText}
-        onChange={e => setOpeningText(e.target.value)}
-        rows={8}
-        placeholder="Il tuo messaggio di apertura al condominio…"
-      />
-      <button className="btn" onClick={handleCreate} disabled={loading || !openingText.trim()}>
-        {loading ? 'Un momento…' : 'Avvia partita'}
-      </button>
-      {existing.length > 0 && (
-        <div style={{ marginTop: 16, textAlign: 'center' }}>
-          <div style={{ color: '#667781', fontSize: 13, marginBottom: 6 }}>Oppure riprendi:</div>
-          {existing.map(id => (
-            <div key={id} style={{ marginBottom: 4 }}>
-              <button className="btn" style={{ background: '#888', fontSize: 13 }} onClick={() => handleLoad(id)}>
-                {id}
-              </button>
+    <div className="setup-page">
+      <div className="setup-card">
+        <div className="setup-hero">
+          <div className="setup-hero-logo">🏢</div>
+          <div className="setup-hero-text">
+            <h1>Condominio Via Garibaldi</h1>
+            <div className="setup-hero-sub">
+              Sei il nuovo amministratore. Cinque residenti, una crisi,
+              quattordici giorni per riuscire a convincerli.
             </div>
-          ))}
+          </div>
+          <div className="setup-hero-meta">
+            <span>🇮🇹 Italiano</span>
+            <span>·</span>
+            <span>14 giorni</span>
+            <span>·</span>
+            <span>5 residenti</span>
+          </div>
         </div>
-      )}
-      {error && <div style={{ color: 'var(--danger)' }}>{error}</div>}
+
+        <div className="setup-body">
+          <div className="setup-col">
+            <div className="setup-section-title">Chi abita al palazzo</div>
+            <div className="cast-preview">
+              {castPreview.map(c => (
+                <div key={c.id} className="cast-row">
+                  <Avatar id={c.id} name={c.name} size={40} />
+                  <div className="cast-row-text">
+                    <div className="cast-name">{c.name}</div>
+                    <div className="cast-sub">{c.sub}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="setup-section-title" style={{ marginTop: 18 }}>Come si gioca</div>
+            <ul className="setup-rules">
+              <li>Ogni residente ha una storia, interessi propri e qualche segreto.</li>
+              <li>Parli con tutti nel gruppo principale, oppure in privato via DM.</li>
+              <li>Deposita mozioni, chiudi votazioni, guida la crisi come credi.</li>
+            </ul>
+          </div>
+
+          <div className="setup-col setup-col-compose">
+            <div className="setup-section-title">Primo avviso al condominio</div>
+            <div className="setup-compose-card">
+              <div className="setup-compose-head">
+                <Avatar id="admin" name="Amministratore" size={30} />
+                <div>
+                  <div className="setup-compose-head-title">Amministratore</div>
+                  <div className="setup-compose-head-sub">→ Gruppo Condominio Via Garibaldi</div>
+                </div>
+              </div>
+              <textarea
+                className="setup-textarea"
+                value={openingText}
+                onChange={e => setOpeningText(e.target.value)}
+                rows={12}
+                placeholder="Il tuo messaggio di apertura al condominio…"
+              />
+              <div className="setup-compose-hint">
+                Scrivi la crisi che preferisci: guasto caldaia, infiltrazioni, un nuovo
+                preventivo che non quadra. La simulazione si adatta a quello che invii.
+              </div>
+            </div>
+
+            <button
+              className="setup-start"
+              onClick={handleCreate}
+              disabled={loading || !openingText.trim()}
+            >
+              {loading ? 'Un momento…' : 'Avvia partita ▶'}
+            </button>
+
+            {existing.length > 0 && (
+              <div className="setup-runs">
+                <button className="setup-runs-toggle" onClick={() => setShowRuns(v => !v)}>
+                  {showRuns ? '▾' : '▸'} Riprendi una partita ({existing.length})
+                </button>
+                {showRuns && (
+                  <div className="setup-runs-list">
+                    {existing.map(id => (
+                      <button
+                        key={id}
+                        className="setup-run-card"
+                        onClick={() => handleLoad(id)}
+                        disabled={loading}
+                      >
+                        <span className="setup-run-icon">📂</span>
+                        <span className="setup-run-id">{id}</span>
+                        <span className="setup-run-arrow">→</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {error && <div className="setup-error">{error}</div>}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -118,10 +232,54 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
   const [goalDraft, setGoalDraft] = useState(agent?.admin_goal || '');
   const [goalSaving, setGoalSaving] = useState(false);
   const [goalStatus, setGoalStatus] = useState('');
+  const [soulText, setSoulText] = useState(null);
+  const [memoryText, setMemoryText] = useState(null);
+  const [showSoul, setShowSoul] = useState(false);
+  const [showMemory, setShowMemory] = useState(false);
 
   useEffect(() => {
     setGoalDraft(agent?.admin_goal || '');
+    // Reset on agent switch; fetched lazily when user expands.
+    setSoulText(null);
+    setMemoryText(null);
+    setShowSoul(false);
+    setShowMemory(false);
   }, [agent?.admin_goal, agentId]);
+
+  const toggleSoul = async () => {
+    const next = !showSoul;
+    setShowSoul(next);
+    if (next && soulText === null) {
+      try {
+        const { content } = await api.getAgentSoul(state.run_id, agentId);
+        setSoulText(content || '(vuoto)');
+      } catch (e) {
+        setSoulText('Errore nel caricamento: ' + String(e));
+      }
+    }
+  };
+
+  const toggleMemory = async () => {
+    const next = !showMemory;
+    setShowMemory(next);
+    if (next && memoryText === null) {
+      try {
+        const { content } = await api.getAgentMemory(state.run_id, agentId);
+        setMemoryText(content || '(vuoto)');
+      } catch (e) {
+        setMemoryText('Errore nel caricamento: ' + String(e));
+      }
+    }
+  };
+
+  const refreshMemory = async () => {
+    try {
+      const { content } = await api.getAgentMemory(state.run_id, agentId);
+      setMemoryText(content || '(vuoto)');
+    } catch (e) {
+      setMemoryText('Errore nel caricamento: ' + String(e));
+    }
+  };
 
   if (!agent) return null;
   const p = agent.persona;
@@ -301,8 +459,29 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
               <div>{OWNER_KIND_LABEL[agent.owner.kind] || agent.owner.kind}</div>
             </div>
             <div className="observer-field">
-              <div className="observer-label">Brief del proprietario</div>
-              <div className="observer-brief">{agent.owner.brief_text}</div>
+              <div className="observer-label">
+                <button type="button" className="observer-toggle" onClick={toggleSoul}>
+                  {showSoul ? '▾' : '▸'} SOUL.md (identità, immutabile)
+                </button>
+              </div>
+              {showSoul && (
+                <pre className="observer-markdown">{soulText ?? 'Caricamento…'}</pre>
+              )}
+            </div>
+            <div className="observer-field">
+              <div className="observer-label">
+                <button type="button" className="observer-toggle" onClick={toggleMemory}>
+                  {showMemory ? '▾' : '▸'} MEMORY.md (taccuino, cresce giorno per giorno)
+                </button>
+                {showMemory && (
+                  <button type="button" className="observer-toggle-small" onClick={refreshMemory} title="Ricarica">
+                    ↻
+                  </button>
+                )}
+              </div>
+              {showMemory && (
+                <pre className="observer-markdown">{memoryText ?? 'Caricamento…'}</pre>
+              )}
             </div>
             {agent.notes?.length > 0 && (
               <div className="observer-field">
@@ -319,7 +498,12 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
   );
 }
 
-function LeftPanel({ state, onSelectChat, godView, onOpenProfile }) {
+function truncate(s, n) {
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
+}
+
+function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, godView, onOpenProfile }) {
   // Compute DM partner counts + trust edges from current state
   const nameById = useMemo(() => {
     const m = {};
@@ -327,6 +511,35 @@ function LeftPanel({ state, onSelectChat, godView, onOpenProfile }) {
     m['admin'] = 'Amministratore';
     return m;
   }, [state.agents]);
+
+  // --- Chat list rows with last message + unread ---
+  const visibleChats = useMemo(() => visibleChatsForAdmin(state, godView), [state, godView]);
+
+  const lastMsgByChat = useMemo(() => {
+    const m = new Map();
+    for (const msg of state.messages) {
+      const prev = m.get(msg.chat_id);
+      if (!prev || msg.fictional_timestamp_minutes > prev.fictional_timestamp_minutes) {
+        m.set(msg.chat_id, msg);
+      }
+    }
+    return m;
+  }, [state.messages]);
+
+  const chatListItems = useMemo(() => {
+    return visibleChats.map(c => {
+      const last = lastMsgByChat.get(c.id) || null;
+      return { chat: c, last };
+    }).sort((a, b) => {
+      // Main/assembly stay pinned near the top
+      const pinA = (a.chat.kind === 'main' || a.chat.kind === 'assembly') ? 1 : 0;
+      const pinB = (b.chat.kind === 'main' || b.chat.kind === 'assembly') ? 1 : 0;
+      if (pinA !== pinB) return pinB - pinA;
+      const at = a.last?.fictional_timestamp_minutes ?? -1;
+      const bt = b.last?.fictional_timestamp_minutes ?? -1;
+      return bt - at;
+    });
+  }, [visibleChats, lastMsgByChat]);
 
   // DM pair counts (bidirectional)
   const dmCounts = useMemo(() => {
@@ -389,6 +602,55 @@ function LeftPanel({ state, onSelectChat, godView, onOpenProfile }) {
 
   return (
     <div className="panel">
+      <div className="panel-title">Chat</div>
+      <div className="chat-list">
+        {chatListItems.length === 0 && (
+          <div className="chat-list-empty">Nessuna chat ancora.</div>
+        )}
+        {chatListItems.map(({ chat, last }) => {
+          const unread = unreadByChat?.[chat.id] || 0;
+          const typing = (typingByChat?.[chat.id] || []).length > 0;
+          const isActive = chat.id === selectedChatId;
+          const isGroup = chat.kind === 'main' || chat.kind === 'assembly';
+          const lastSender = last?.sender_kind === 'admin'
+            ? 'Tu'
+            : (last?.sender_display_name || '').split(' ').slice(-1)[0];
+          const previewText = last
+            ? (isGroup || last.sender_kind === 'admin'
+                ? `${lastSender}: ${last.content}`
+                : last.content)
+            : (isGroup ? 'Gruppo condominiale' : 'Nessun messaggio');
+          const timeLabel = last
+            ? (last.day === state.clock.day
+                ? (formatItalianDateTime(state.fictional_start_iso, last.fictional_timestamp_minutes).split(', ')[1] || '')
+                : `g. ${last.day}`)
+            : '';
+          return (
+            <div
+              key={chat.id}
+              className={`chat-list-row ${isActive ? 'active' : ''} ${unread > 0 ? 'has-unread' : ''}`}
+              onClick={() => onSelectChat(chat.id)}
+            >
+              <Avatar id={chat.id} name={chat.display_name} size={42} />
+              <div className="chat-list-main">
+                <div className="chat-list-top">
+                  <span className="chat-list-name">{chat.display_name}</span>
+                  <span className="chat-list-time">{timeLabel}</span>
+                </div>
+                <div className="chat-list-bot">
+                  <span className="chat-list-preview">
+                    {typing
+                      ? <span className="chat-list-typing">sta scrivendo…</span>
+                      : truncate(previewText, 48)}
+                  </span>
+                  {unread > 0 && <span className="chat-list-unread">{unread}</span>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
       <div className="panel-title">Residenti</div>
       {state.agents.map(a => {
         const msgsToday = state.messages.filter(m => m.sender_id === a.persona.id && m.day === state.clock.day).length;
@@ -400,24 +662,29 @@ function LeftPanel({ state, onSelectChat, godView, onOpenProfile }) {
             onClick={() => onOpenProfile(a.persona.id)}
             title="Apri profilo"
           >
-            <div className="resident-row">
-              <div>
-                <span className="name">{a.persona.display_name}</span>
-                {a.admin_goal && <span className="goal-badge" title="Ha un obiettivo aggiuntivo">🎯</span>}
-                <span className="unit">int. {a.persona.unit} · {a.persona.millesimi}mill.</span>
-              </div>
-              {chatId && (
+            <Avatar id={a.persona.id} name={a.persona.display_name} size={42} />
+            <div className="resident-main">
+              <div className="resident-row">
+                <div className="resident-name-line">
+                  <span className="name">{a.persona.display_name}</span>
+                  {a.admin_goal && <span className="goal-badge" title="Ha un obiettivo aggiuntivo">🎯</span>}
+                </div>
                 <button
                   className="resident-chat-btn"
-                  onClick={(e) => { e.stopPropagation(); onSelectChat(chatId); }}
-                  title="Apri chat"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (chatId) onSelectChat(chatId);
+                    else onStartDm(a.persona.id);
+                  }}
+                  title={chatId ? 'Apri chat' : 'Inizia DM'}
                 >💬</button>
+              </div>
+              <div className="resident-unit-line">int. {a.persona.unit} · {a.persona.millesimi} mill.</div>
+              <div className="desc">{a.persona.public_description}</div>
+              {msgsToday > 0 && (
+                <div className="resident-today">{msgsToday} msg oggi</div>
               )}
             </div>
-            <div className="desc">{a.persona.public_description}</div>
-            {msgsToday > 0 && (
-              <div className="resident-today">{msgsToday} msg oggi</div>
-            )}
           </div>
         );
       })}
@@ -489,7 +756,111 @@ function visibleChatsForAdmin(state, godView) {
   );
 }
 
-function ChatColumn({ state, selectedChatId, onSelect, typingByChat, godView }) {
+function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+
+  // Clear composer state whenever the active chat changes.
+  useEffect(() => {
+    setText('');
+    setError('');
+  }, [chat?.id]);
+
+  if (!chat) return null;
+
+  const isGroup = chat.kind === 'main' || chat.kind === 'assembly';
+  const isAdminDm = chat.kind === 'dm' && chat.member_ids.includes('admin');
+  const otherId = isAdminDm ? chat.member_ids.find(id => id !== 'admin') : null;
+  const otherAgent = otherId ? state.agents.find(a => a.persona.id === otherId) : null;
+
+  let mode = 'disabled';
+  let placeholder = 'Non puoi scrivere in questa chat (visibile solo in modalità osservatore).';
+  let label = '';
+  if (isGroup) {
+    mode = 'announce';
+    placeholder = 'Scrivi un avviso al condominio…';
+    label = 'Avviso al condominio';
+  } else if (isAdminDm) {
+    mode = 'dm';
+    placeholder = `Scrivi a ${otherAgent?.persona.display_name || 'residente'}…`;
+    label = `DM · ${otherAgent?.persona.display_name || ''}`;
+  }
+
+  const canSend = mode !== 'disabled' && text.trim() && !sending;
+
+  const handleSend = async () => {
+    if (!canSend) return;
+    setSending(true);
+    setError('');
+    try {
+      if (mode === 'announce') await onSendAnnounce(text.trim());
+      else if (mode === 'dm') await onSendDm(otherId, text.trim());
+      setText('');
+    } catch (e) {
+      setError('Errore: ' + String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const onKeyDown = (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const speedChips = (mode === 'announce')
+    ? (suggestions || []).filter(s => !s.action)
+    : [];
+
+  return (
+    <div className={`chat-composer ${mode === 'disabled' ? 'disabled' : ''}`}>
+      {label && (
+        <div className="chat-composer-label">
+          <span>{label}</span>
+          <span className="chat-composer-hint">⌘↵ per inviare</span>
+        </div>
+      )}
+      {speedChips.length > 0 && (
+        <div className="chat-composer-chips">
+          {speedChips.map(s => (
+            <button
+              key={s.id}
+              type="button"
+              className="template-chip"
+              title={s.body || s.label}
+              onClick={() => setText(s.body || '')}
+            >{s.label}</button>
+          ))}
+        </div>
+      )}
+      <div className="chat-composer-row">
+        <textarea
+          className="chat-composer-input"
+          placeholder={placeholder}
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={onKeyDown}
+          disabled={mode === 'disabled' || sending}
+          rows={2}
+        />
+        <button
+          className="chat-composer-send"
+          onClick={handleSend}
+          disabled={!canSend}
+          title={mode === 'announce' ? 'Pubblica avviso' : mode === 'dm' ? 'Invia DM' : 'Non disponibile'}
+        >
+          {sending ? '…' : '➤'}
+        </button>
+      </div>
+      {error && <div className="chat-composer-error">{error}</div>}
+    </div>
+  );
+}
+
+function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView, suggestions, onSendAnnounce, onSendDm, onOpenProfile }) {
   const chats = visibleChatsForAdmin(state, godView);
   const msgsByChat = useMemo(() => {
     const m = new Map();
@@ -501,8 +872,9 @@ function ChatColumn({ state, selectedChatId, onSelect, typingByChat, godView }) 
     return m;
   }, [state, chats]);
 
-  const selected = chats.find(c => c.id === selectedChatId) || chats[0];
-  const selectedMsgs = selected ? (msgsByChat.get(selected.id) || []) : [];
+  // Priority: explicit selection → pending placeholder → first available chat.
+  const selected = chats.find(c => c.id === selectedChatId) || pendingChat || chats[0];
+  const selectedMsgs = (selected && !selected._pending) ? (msgsByChat.get(selected.id) || []) : [];
   const scrollRef = useRef(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -513,39 +885,119 @@ function ChatColumn({ state, selectedChatId, onSelect, typingByChat, godView }) 
 
   const typingNames = selected ? (typingByChat[selected.id] || []) : [];
 
+  // Build a WhatsApp-style chat header line for the current chat.
+  const chatHeader = useMemo(() => {
+    if (!selected) return null;
+    const otherNames = (selected.member_ids || [])
+      .filter(id => id !== 'admin')
+      .map(id => {
+        const a = state.agents.find(x => x.persona.id === id);
+        return a?.persona.display_name || id;
+      });
+    if (selected.kind === 'main' || selected.kind === 'assembly') {
+      return { title: selected.display_name, sub: `${otherNames.length} residenti · gruppo condominiale` };
+    }
+    if (selected.kind === 'dm') {
+      return { title: selected.display_name, sub: 'Messaggio privato' };
+    }
+    return { title: selected.display_name, sub: '' };
+  }, [selected, state.agents]);
+
+  // Build render items with date separators between days.
+  const renderedItems = useMemo(() => {
+    const out = [];
+    let lastDay = null;
+    for (let i = 0; i < selectedMsgs.length; i++) {
+      const m = selectedMsgs[i];
+      if (m.day !== lastDay) {
+        out.push({ type: 'day', day: m.day, ts: m.fictional_timestamp_minutes, key: `day-${m.day}-${i}` });
+        lastDay = m.day;
+      }
+      out.push({ type: 'msg', msg: m, prev: selectedMsgs[i - 1], key: m.id });
+    }
+    return out;
+  }, [selectedMsgs]);
+
+  // DM chats: clicking the header opens the other resident's profile.
+  const dmOtherId = selected?.kind === 'dm'
+    ? selected.member_ids.find(id => id !== 'admin' && state.agents.some(a => a.persona.id === id))
+    : null;
+  const headerClickable = !!dmOtherId && !!onOpenProfile;
+
   return (
     <div className="chat-col">
-      <div className="chat-tabs">
-        {chats.map(c => {
-          const count = msgsByChat.get(c.id)?.length || 0;
-          const typing = (typingByChat[c.id] || []).length;
-          return (
-            <div
-              key={c.id}
-              className={`chat-tab ${selected?.id === c.id ? 'active' : ''}`}
-              onClick={() => onSelect(c.id)}
-            >
-              {c.display_name}
-              <span className="count">{count}</span>
-              {typing > 0 && <span className="typing-dot" title={`${typing} sta scrivendo`}>•</span>}
-            </div>
-          );
-        })}
-      </div>
+      {chatHeader && (
+        <div
+          className={`chat-header ${headerClickable ? 'clickable' : ''}`}
+          onClick={() => headerClickable && onOpenProfile(dmOtherId)}
+          title={headerClickable ? 'Apri profilo' : undefined}
+        >
+          <Avatar id={selected.id} name={chatHeader.title} size={36} />
+          <div className="chat-header-text">
+            <div className="chat-header-title">{chatHeader.title}</div>
+            <div className="chat-header-sub">{chatHeader.sub}</div>
+          </div>
+        </div>
+      )}
       <div className="chat-messages" ref={scrollRef}>
-        {selectedMsgs.length === 0 ? (
-          <div className="chat-empty">Nessun messaggio ancora.</div>
+        {renderedItems.length === 0 ? (
+          <div className="chat-empty">
+            <div className="chat-empty-icon">💬</div>
+            <div>Nessun messaggio ancora.</div>
+            <div className="chat-empty-sub">Scrivi qui sotto o fai passare il giorno.</div>
+          </div>
         ) : (
-          selectedMsgs.map(m => (
-            <div
-              key={m.id}
-              className={`msg ${m.sender_kind === 'admin' ? 'admin' : m.sender_kind === 'external' ? 'external' : ''} ${m.isNew ? 'fade-in' : ''}`}
-            >
-              <div className="sender">{m.sender_display_name}</div>
-              <div className="content">{m.content}</div>
-              <div className="ts">{formatItalianDateTime(state.fictional_start_iso, m.fictional_timestamp_minutes)}</div>
-            </div>
-          ))
+          renderedItems.map(item => {
+            if (item.type === 'day') {
+              const label = formatItalianDateTime(state.fictional_start_iso, item.ts)
+                .split(', ')[0] || '';
+              return (
+                <div key={item.key} className="msg-day-separator">
+                  <span>Giorno {item.day} · {label}</span>
+                </div>
+              );
+            }
+            const m = item.msg;
+            const prev = item.prev;
+            const isSelf = m.sender_kind === 'admin';
+            const kindClass = isSelf
+              ? 'self'
+              : m.sender_kind === 'external'
+                ? 'external'
+                : 'other';
+            const sameAsPrev = prev
+              && prev.day === m.day
+              && prev.sender_id === m.sender_id
+              && prev.sender_kind === m.sender_kind
+              && (m.fictional_timestamp_minutes - prev.fictional_timestamp_minutes) < 10;
+            const ts = formatItalianDateTime(state.fictional_start_iso, m.fictional_timestamp_minutes)
+              .split(', ')[1] || '';
+            return (
+              <div
+                key={m.id}
+                className={`msg-row ${kindClass} ${sameAsPrev ? 'grouped' : ''} ${m.isNew ? 'fade-in' : ''}`}
+              >
+                {!isSelf && (
+                  <div className="msg-avatar-slot">
+                    {!sameAsPrev && (
+                      <Avatar
+                        id={m.sender_id}
+                        name={m.sender_display_name}
+                        size={30}
+                      />
+                    )}
+                  </div>
+                )}
+                <div className={`msg ${kindClass}`}>
+                  {!sameAsPrev && !isSelf && (
+                    <div className="sender">{m.sender_display_name}</div>
+                  )}
+                  <div className="content">{m.content}</div>
+                  <div className="ts">{ts}</div>
+                </div>
+              </div>
+            );
+          })
         )}
         {typingNames.length > 0 && (
           <div className="typing-indicator">
@@ -554,41 +1006,26 @@ function ChatColumn({ state, selectedChatId, onSelect, typingByChat, godView }) 
           </div>
         )}
       </div>
+      <ChatComposer
+        state={state}
+        chat={selected}
+        suggestions={suggestions}
+        onSendAnnounce={onSendAnnounce}
+        onSendDm={onSendDm}
+      />
     </div>
   );
 }
 
-function AdminConsole({ state, onAction, working, onAdvance, onFileMotion, onCloseMotion, dayComplete }) {
-  const [announceText, setAnnounceText] = useState('');
-  const [dmText, setDmText] = useState('');
-  const [dmRecipient, setDmRecipient] = useState(state.agents[0]?.persona.id || '');
+function AdminConsole({ state, working, onAdvance, onFileMotion, onCloseMotion, dayComplete, suggestions }) {
   const [motionTitle, setMotionTitle] = useState('');
   const [motionDesc, setMotionDesc] = useState('');
   const [status, setStatus] = useState('');
   const [templates, setTemplates] = useState({ actions: [], motion_templates: [] });
-  const [suggestions, setSuggestions] = useState([]);
 
   useEffect(() => {
     fetch(`${BACKEND}/api/quick_actions`).then(r => r.json()).then(setTemplates).catch(() => {});
   }, []);
-
-  // Re-fetch suggestions whenever day/state/motions change
-  useEffect(() => {
-    fetch(`${BACKEND}/api/runs/${state.run_id}/suggestions`)
-      .then(r => r.json())
-      .then(d => setSuggestions(d.suggestions || []))
-      .catch(() => {});
-  }, [state.run_id, state.clock.day, (state.motions || []).length]);
-
-  const useSuggestion = (sug) => {
-    if (sug.action === 'close_motion' && sug.motion_id) {
-      onCloseMotion(sug.motion_id);
-      setStatus('Votazione chiusa.');
-      return;
-    }
-    setAnnounceText(sug.body || '');
-    setStatus('Suggerimento caricato — puoi modificarlo prima di pubblicare.');
-  };
 
   const fillTemplate = (tpl) => {
     if (tpl.title) setMotionTitle(tpl.title);
@@ -605,22 +1042,6 @@ function AdminConsole({ state, onAction, working, onAdvance, onFileMotion, onClo
     }
   }, []);
 
-  const handleAnnounce = async () => {
-    if (!announceText.trim()) return;
-    await doAction(async () => {
-      await api.announce(state.run_id, announceText);
-      setAnnounceText('');
-    }, 'Avviso pubblicato.');
-  };
-
-  const handleDm = async () => {
-    if (!dmText.trim() || !dmRecipient) return;
-    await doAction(async () => {
-      await api.sendDm(state.run_id, dmRecipient, dmText);
-      setDmText('');
-    }, 'Messaggio privato inviato.');
-  };
-
   const handleFileMotion = async () => {
     if (!motionTitle.trim() || !motionDesc.trim()) return;
     await doAction(async () => {
@@ -630,6 +1051,13 @@ function AdminConsole({ state, onAction, working, onAdvance, onFileMotion, onClo
     }, 'Mozione depositata.');
   };
 
+  const handleCloseFromChip = async (sug) => {
+    if (sug.action !== 'close_motion' || !sug.motion_id) return;
+    await doAction(async () => {
+      await onCloseMotion(sug.motion_id);
+    }, 'Votazione chiusa.');
+  };
+
   const handleAdvance = async () => {
     if (onAdvance) onAdvance();
   };
@@ -637,8 +1065,7 @@ function AdminConsole({ state, onAction, working, onAdvance, onFileMotion, onClo
   const openMotions = (state.motions || []).filter(m => m.status === 'open');
   const closedMotions = (state.motions || []).filter(m => m.status !== 'open').slice(-5);
 
-  const speedChips = suggestions.filter(s => !s.action); // pure text suggestions
-  const actionChips = suggestions.filter(s => s.action === 'close_motion');
+  const actionChips = (suggestions || []).filter(s => s.action === 'close_motion');
 
   return (
     <div className="console">
@@ -657,52 +1084,6 @@ function AdminConsole({ state, onAction, working, onAdvance, onFileMotion, onClo
           disabled={working}
         >
           {working ? 'Un momento…' : `Fai passare il giorno →`}
-        </button>
-      </div>
-
-      {/* Avviso + inline suggestions */}
-      <div className="console-section">
-        <h2>Avviso al condominio</h2>
-        {speedChips.length > 0 && (
-          <div className="template-row">
-            {speedChips.map(s => (
-              <button
-                key={s.id}
-                className="template-chip"
-                title={s.body || s.label}
-                onClick={() => useSuggestion(s)}
-              >{s.label}</button>
-            ))}
-          </div>
-        )}
-        <textarea
-          placeholder="Scrivi un avviso al gruppo principale…"
-          value={announceText}
-          onChange={e => setAnnounceText(e.target.value)}
-        />
-        <button className="btn" onClick={handleAnnounce} disabled={!announceText.trim()}>
-          Pubblica avviso
-        </button>
-      </div>
-
-      {/* DM — compact */}
-      <div className="console-section">
-        <h2>Messaggio privato</h2>
-        <select value={dmRecipient} onChange={e => setDmRecipient(e.target.value)}>
-          {state.agents.map(a => (
-            <option key={a.persona.id} value={a.persona.id}>
-              {a.persona.display_name} (int. {a.persona.unit})
-            </option>
-          ))}
-        </select>
-        <textarea
-          placeholder="DM al residente…"
-          value={dmText}
-          onChange={e => setDmText(e.target.value)}
-          style={{ minHeight: 44 }}
-        />
-        <button className="btn" onClick={handleDm} disabled={!dmText.trim()}>
-          Invia DM
         </button>
       </div>
 
@@ -777,7 +1158,7 @@ function AdminConsole({ state, onAction, working, onAdvance, onFileMotion, onClo
               <button
                 key={s.id}
                 className="btn secondary quick-action-btn"
-                onClick={() => useSuggestion(s)}
+                onClick={() => handleCloseFromChip(s)}
                 title={s.label}
               >{s.label}</button>
             ))}
@@ -806,6 +1187,59 @@ export default function App() {
   const [godView, setGodView] = useState(true);
   const [profileAgentId, setProfileAgentId] = useState(null);
   const [dayComplete, setDayComplete] = useState(false);
+  const [unreadByChat, setUnreadByChat] = useState({});
+  const [suggestions, setSuggestions] = useState([]);
+  // A transient "chat doesn't exist yet" placeholder, used when the admin
+  // wants to DM a resident they've never messaged before. Cleared once the
+  // real chat lands via SSE.
+  const [pendingDmRecipient, setPendingDmRecipient] = useState(null);
+
+  // Ref so SSE handlers always see the latest selected chat without needing
+  // to re-subscribe when the selection changes.
+  const selectedChatIdRef = useRef(null);
+  useEffect(() => { selectedChatIdRef.current = selectedChatId; }, [selectedChatId]);
+
+  // Clear unread count when a chat is opened.
+  const handleSelectChat = useCallback((chatId) => {
+    setSelectedChatId(chatId);
+    setPendingDmRecipient(null);
+    setUnreadByChat(prev => {
+      if (!prev[chatId]) return prev;
+      const next = { ...prev };
+      delete next[chatId];
+      return next;
+    });
+  }, []);
+
+  // Start (or open, if it exists) a DM with a resident.
+  const handleStartDm = useCallback((residentId) => {
+    const existing = state?.chats.find(c =>
+      c.kind === 'dm'
+      && c.member_ids.includes('admin')
+      && c.member_ids.includes(residentId)
+    );
+    if (existing) {
+      handleSelectChat(existing.id);
+    } else {
+      setSelectedChatId(null);
+      setPendingDmRecipient(residentId);
+    }
+  }, [state, handleSelectChat]);
+
+  // When a pending DM's real chat shows up in state (via SSE after first send),
+  // switch selection to it and clear the placeholder.
+  useEffect(() => {
+    if (!pendingDmRecipient || !state) return;
+    const real = state.chats.find(c =>
+      c.kind === 'dm'
+      && c.member_ids.includes('admin')
+      && c.member_ids.includes(pendingDmRecipient)
+    );
+    if (real) {
+      setSelectedChatId(real.id);
+      setPendingDmRecipient(null);
+    }
+  }, [state?.chats, pendingDmRecipient]);
 
   // Subscribe to SSE on run load
   useEffect(() => {
@@ -815,15 +1249,27 @@ export default function App() {
     es.addEventListener('message_sent', (e) => {
       const payload = JSON.parse(e.data).data;
       const msg = payload.message;
+      let isNewToState = false;
       setState(prev => {
         if (!prev) return prev;
         if (prev.messages.some(m => m.id === msg.id)) return prev;
+        isNewToState = true;
         // Also merge any new chat if this is a freshly-created DM/group
         const chats = payload.chat && !prev.chats.some(c => c.id === payload.chat.id)
           ? [...prev.chats, payload.chat]
           : prev.chats;
         return { ...prev, messages: [...prev.messages, { ...msg, isNew: true }], chats };
       });
+      // Bump unread count if the message is in a chat the user isn't currently
+      // looking at, and it isn't the admin's own message.
+      if (isNewToState
+          && msg.sender_kind !== 'admin'
+          && msg.chat_id !== selectedChatIdRef.current) {
+        setUnreadByChat(prev => ({
+          ...prev,
+          [msg.chat_id]: (prev[msg.chat_id] || 0) + 1,
+        }));
+      }
     });
 
     es.addEventListener('typing_start', (e) => {
@@ -850,7 +1296,17 @@ export default function App() {
       const d = JSON.parse(e.data).data;
       setDayStatus(`Giorno ${d.day} concluso: ${d.activations} attivazioni, ${d.total_messages} messaggi totali.`);
       setDayComplete(true);
-      api.getRun(state.run_id).then(setState).catch(() => {});
+      // Refresh metadata (clock, trust, motions) but preserve the messages
+      // we accumulated via the SSE stream — fetched state may lag by a few
+      // hundred ms while memory consolidation finishes server-side.
+      api.getRun(state.run_id).then(fresh => {
+        setState(prev => {
+          if (!prev) return fresh;
+          const seen = new Set(fresh.messages.map(m => m.id));
+          const extras = prev.messages.filter(m => !seen.has(m.id));
+          return { ...fresh, messages: [...fresh.messages, ...extras] };
+        });
+      }).catch(() => {});
       setTypingAgents({});
     });
 
@@ -918,12 +1374,6 @@ export default function App() {
     setTypingByChat(names.length > 0 ? { main: names } : {});
   }, [typingAgents]);
 
-  const refresh = useCallback(async () => {
-    if (!state) return;
-    const fresh = await api.getRun(state.run_id);
-    setState(prev => ({ ...fresh, messages: fresh.messages })); // clear isNew flags
-  }, [state]);
-
   const onAdvance = useCallback(async () => {
     if (!state || working) return;
     setWorking(true);
@@ -938,11 +1388,6 @@ export default function App() {
     }
   }, [state, working]);
 
-  const onAdminMessage = useCallback(async () => {
-    if (!state) return;
-    await refresh();
-  }, [state, refresh]);
-
   const onFileMotion = useCallback(async (title, description) => {
     if (!state) return;
     await api.fileMotion(state.run_id, title, description);
@@ -953,15 +1398,55 @@ export default function App() {
     await api.closeMotion(state.run_id, motionId);
   }, [state]);
 
+  const onSendAnnounce = useCallback(async (text) => {
+    if (!state) return;
+    await api.announce(state.run_id, text);
+  }, [state?.run_id]);
+
+  const onSendDm = useCallback(async (recipientId, text) => {
+    if (!state) return;
+    await api.sendDm(state.run_id, recipientId, text);
+  }, [state?.run_id]);
+
+  // Fetch suggestion chips whenever run state meaningfully changes.
+  useEffect(() => {
+    if (!state?.run_id) return;
+    let cancelled = false;
+    fetch(`${BACKEND}/api/runs/${state.run_id}/suggestions`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setSuggestions(d.suggestions || []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [state?.run_id, state?.clock?.day, (state?.motions || []).length]);
+
   if (!state) return <Setup onCreated={setState} />;
 
   const displayDate = formatItalianDateTime(state.fictional_start_iso, state.clock.minutes_since_start);
 
+  // Build a placeholder chat object when the admin is starting a DM with a
+  // resident they've never messaged. ChatColumn renders it like a real chat.
+  const pendingDmChat = pendingDmRecipient
+    ? (() => {
+        const a = state.agents.find(x => x.persona.id === pendingDmRecipient);
+        return {
+          id: `__pending_dm__${pendingDmRecipient}`,
+          kind: 'dm',
+          member_ids: ['admin', pendingDmRecipient],
+          display_name: `DM con ${a?.persona.display_name || pendingDmRecipient}`,
+          _pending: true,
+        };
+      })()
+    : null;
+
   return (
     <div className="app">
       <div className="topbar">
-        <div>
-          <h1>Condominio Via Garibaldi</h1>
+        <div className="topbar-left">
+          <div className="topbar-logo">🏢</div>
+          <div>
+            <h1>Condominio Via Garibaldi</h1>
+            <div className="topbar-sub">Amministratore · crisi in corso</div>
+          </div>
         </div>
         <div className="fictional-clock" title="Data e ora nel mondo del palazzo">
           <div className="fictional-clock-label">Ora nel palazzo</div>
@@ -976,32 +1461,44 @@ export default function App() {
             />
             <span>👁️ Osservatore</span>
           </label>
-          <div className="day-badge">Giorno {state.clock.day}</div>
+          <div className="day-badge">
+            <span className="day-badge-n">{state.clock.day}</span>
+            <span className="day-badge-sep">/</span>
+            <span className="day-badge-tot">14</span>
+          </div>
         </div>
       </div>
       {dayStatus && <div className="day-status-bar">{dayStatus}</div>}
       <div className="main">
         <LeftPanel
           state={state}
-          onSelectChat={setSelectedChatId}
+          selectedChatId={selectedChatId}
+          onSelectChat={handleSelectChat}
+          onStartDm={handleStartDm}
+          unreadByChat={unreadByChat}
+          typingByChat={typingByChat}
           godView={godView}
           onOpenProfile={setProfileAgentId}
         />
         <ChatColumn
           state={state}
           selectedChatId={selectedChatId}
-          onSelect={setSelectedChatId}
+          pendingChat={pendingDmChat}
           typingByChat={typingByChat}
           godView={godView}
+          suggestions={suggestions}
+          onSendAnnounce={onSendAnnounce}
+          onSendDm={onSendDm}
+          onOpenProfile={setProfileAgentId}
         />
         <AdminConsole
           state={state}
-          onAction={onAdminMessage}
           working={working}
           onAdvance={onAdvance}
           onFileMotion={onFileMotion}
           onCloseMotion={onCloseMotion}
           dayComplete={dayComplete}
+          suggestions={suggestions}
         />
       </div>
       {profileAgentId && (

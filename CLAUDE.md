@@ -102,8 +102,14 @@ Two enforcement layers:
 
 **Block-and-bail invariant**: near-duplicate resend detection sets
 `ctx.done = True`, ending the activation — this prevents the "tack on a
-different tail to slip past the filter" workaround. Regular refusals (daily
-cap, consecutive-DM) do NOT end the activation.
+different tail to slip past the filter" workaround. Regular refusals (DM
+cooldown) do NOT end the activation.
+
+**DM cooldown** (`_dm_cooldown_active`, `DM_REPLY_COOLDOWN_MIN = 240`
+fictional minutes): reply-gated, not turn-counted. An agent can send a
+follow-up DM to the same chat only once the partner replies OR the cooldown
+elapses. Replaces the old `PER_DM_DAILY_HARD_CAP`, which stifled realistic
+follow-ups (especially to a silent admin).
 
 ### Trust matrix (`backend/dials.py`)
 

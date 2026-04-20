@@ -343,7 +343,7 @@ def _resolve_chat(state: RunState, ref: str, current_agent_id: str | None = None
     return None
 
 
-PER_DM_DAILY_HARD_CAP = 2  # max messages per DM chat per agent per day
+DM_REPLY_COOLDOWN_MIN = 240  # fictional minutes to wait before re-DMing the same chat without a reply
 
 
 def _tokens(s: str) -> set[str]:
@@ -391,14 +391,6 @@ def _is_near_duplicate(state: RunState, chat_id: str, sender_id: str, text: str)
     return False
 
 
-def _chat_message_count_today(state: RunState, chat_id: str, sender_id: str) -> int:
-    day = state.clock.day
-    return sum(
-        1 for m in state.messages
-        if m.chat_id == chat_id and m.sender_id == sender_id and m.day == day
-    )
-
-
 def _last_message_in_chat(state: RunState, chat_id: str) -> Message | None:
     """Most recent (by fictional time) message in a chat, or None if empty."""
     best = None
@@ -410,15 +402,20 @@ def _last_message_in_chat(state: RunState, chat_id: str) -> Message | None:
     return best
 
 
-def _would_be_consecutive_dm(state: RunState, chat: Chat, sender_id: str) -> bool:
-    """In a DM, refuse to send if the last message in the chat is already from
-    this agent — they're waiting for the partner to reply, not monologuing."""
+def _dm_cooldown_active(state: RunState, chat: Chat, sender_id: str) -> bool:
+    """In a DM, refuse a follow-up send if the partner hasn't replied and the
+    previous send from this agent was less than DM_REPLY_COOLDOWN_MIN fictional
+    minutes ago. After the cooldown elapses, the agent can chase; within it,
+    they're expected to wait. Reply-gated, not turn-counted — enables realistic
+    follow-ups (especially to a silent admin) without encouraging back-to-back
+    spam."""
     if chat.kind != "dm":
         return False
     last = _last_message_in_chat(state, chat.id)
-    if last is None:
+    if last is None or last.sender_id != sender_id:
         return False
-    return last.sender_id == sender_id
+    elapsed = state.clock.minutes_since_start - last.fictional_timestamp_minutes
+    return elapsed < DM_REPLY_COOLDOWN_MIN
 
 
 def _resolve_recipient(state: RunState, ref: str) -> str | None:
@@ -568,20 +565,15 @@ def tool_send_message(ctx: ToolContext, chat_id: str, text: str) -> str:
             f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
             f"di persona — solo chat. Metti giù il telefono."
         )
-    if _would_be_consecutive_dm(state, chat, ctx.agent_id):
+    if _dm_cooldown_active(state, chat, ctx.agent_id):
         return (
-            f"Hai già scritto l'ultimo messaggio in questa chat privata e "
-            f"non ti hanno ancora risposto. Non mandare un altro messaggio qui — "
-            f"se hai altro da fare altrove, fallo; altrimenti metti giù il telefono."
+            f"Hai scritto da poco in questa chat privata e non ti hanno ancora "
+            f"risposto. Dagli qualche ora prima di riscrivere — se hai altro da "
+            f"fare altrove, fallo; altrimenti metti giù il telefono."
         )
     if _is_near_duplicate(state, chat.id, ctx.agent_id, text):
         ctx.done = True
         return "Hai appena scritto qualcosa di molto simile. Non riformulare, non inventare scuse — metti giù il telefono."
-    if chat.kind == "dm" and _chat_message_count_today(state, chat.id, ctx.agent_id) >= PER_DM_DAILY_HARD_CAP:
-        return (
-            "Hai già scritto parecchio in questa chat privata oggi, lasciala respirare. "
-            "Se hai altro da dire altrove fallo, altrimenti metti giù il telefono."
-        )
 
     msg = _create_and_append_message(ctx, chat, ctx.agent_id, text)
     # Trust signal: attack-by-name in a main/group chat (public attacks only).
@@ -644,21 +636,15 @@ def tool_send_dm(ctx: ToolContext, recipient_id: str, text: str) -> str:
             f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
             f"di persona — solo chat. Metti giù il telefono."
         )
-    if _would_be_consecutive_dm(state, dm_chat, ctx.agent_id):
+    if _dm_cooldown_active(state, dm_chat, ctx.agent_id):
         return (
-            f"Hai già scritto l'ultimo messaggio a {_display_for(state, recipient_id)} "
-            f"e non ti hanno ancora risposto. Non scrivergli di nuovo ora — se hai altro "
-            f"da fare altrove, fallo; altrimenti metti giù il telefono."
+            f"Hai scritto da poco a {_display_for(state, recipient_id)} e non ti "
+            f"hanno ancora risposto. Dagli qualche ora prima di riscrivere — se hai "
+            f"altro da fare altrove, fallo; altrimenti metti giù il telefono."
         )
     if _is_near_duplicate(state, dm_chat.id, ctx.agent_id, text):
         ctx.done = True
         return "Hai appena scritto qualcosa di molto simile a questa persona. Non riformulare, non inventare scuse — metti giù il telefono."
-    if _chat_message_count_today(state, dm_chat.id, ctx.agent_id) >= PER_DM_DAILY_HARD_CAP:
-        return (
-            f"Hai già scritto parecchio a {_display_for(state, recipient_id)} oggi, "
-            f"lasciale rispondere. Se hai altro da fare altrove fallo, altrimenti metti "
-            f"giù il telefono."
-        )
 
     # Detect reply-to-partner BEFORE the send: if the current last message in
     # this DM is from the recipient, this send closes the turn → +trust.
@@ -833,14 +819,12 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
     if not _is_member(target_chat, ctx.agent_id):
         return "Non puoi inoltrare in una chat di cui non fai parte."
 
-    # Consecutive-DM guard also applies to forwards
-    if _would_be_consecutive_dm(state, target_chat, ctx.agent_id):
+    # DM cooldown guard also applies to forwards
+    if _dm_cooldown_active(state, target_chat, ctx.agent_id):
         return (
-            f"Hai appena scritto l'ultimo messaggio in questa chat e non ti hanno "
-            f"ancora risposto. Aspetta prima di inoltrare altro."
+            f"Hai scritto da poco in questa chat e non ti hanno ancora risposto. "
+            f"Aspetta qualche ora prima di inoltrare altro."
         )
-    if target_chat.kind == "dm" and _chat_message_count_today(state, target_chat.id, ctx.agent_id) >= PER_DM_DAILY_HARD_CAP:
-        return "Hai già scritto parecchio in questa chat oggi, lasciala respirare."
 
     comment = (your_comment or "").strip()
     body_parts = []

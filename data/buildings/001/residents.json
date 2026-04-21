@@ -10,7 +10,8 @@
       "millesimi": 150
     },
     "owner_kind": "self",
-    "starting_wallet_eur": 3400
+    "starting_wallet_eur": 3400,
+    "model": "meta-llama/llama-3.3-70b-instruct"
   },
   {
     "persona": {
@@ -23,7 +24,8 @@
       "millesimi": 170
     },
     "owner_kind": "absentee_landlord",
-    "starting_wallet_eur": 6500
+    "starting_wallet_eur": 6500,
+    "model": "x-ai/grok-4-fast"
   },
   {
     "persona": {
@@ -49,7 +51,8 @@
       "millesimi": 180
     },
     "owner_kind": "family_proxy",
-    "starting_wallet_eur": 2800
+    "starting_wallet_eur": 2800,
+    "model": "mistralai/mistral-small-2603"
   },
   {
     "persona": {

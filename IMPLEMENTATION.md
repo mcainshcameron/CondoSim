@@ -218,7 +218,7 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 **Status**: the balance between "too chatty" and "ghost town" is narrow. Recent tuning cycles:
 - AGENT_MAX_TOKENS=500 → 220 → 150 → 180 (now)
-- PER_DM_DAILY_HARD_CAP 4 → 2
+- PER_DM_DAILY_HARD_CAP 4 → 2 → removed (replaced by reply-gated cooldown: DM_REPLY_COOLDOWN_MIN=240 fictional minutes; an agent can DM the same chat again only once the partner replies OR ~4h of fictional time have passed)
 - Brevity examples + three-options notification framing
 
 **Observation**: small prompt changes swing volume 3× either way. The model is highly sensitive to phrasing of restraint cues. Current setting (180 tokens, equal three-options framing) produces ~2 text + ~3 reactions per day per agent, which is realistic — but day-2 dead zones still happen.

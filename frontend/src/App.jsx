@@ -877,13 +877,15 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
   const selectedMsgs = (selected && !selected._pending) ? (msgsByChat.get(selected.id) || []) : [];
   const scrollRef = useRef(null);
 
-  // Auto-scroll to bottom when new messages arrive
+  const typingNames = selected ? (typingByChat[selected.id] || []) : [];
+
+  // Auto-scroll to bottom when new messages arrive, and whenever the typing
+  // indicator appears or disappears — otherwise its height change shifts the
+  // last message up/down and makes the conversation hard to follow.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [selectedMsgs.length, selected?.id]);
-
-  const typingNames = selected ? (typingByChat[selected.id] || []) : [];
+  }, [selectedMsgs.length, selected?.id, typingNames.length]);
 
   // Build a WhatsApp-style chat header line for the current chat.
   const chatHeader = useMemo(() => {

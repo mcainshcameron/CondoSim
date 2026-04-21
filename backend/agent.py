@@ -65,6 +65,7 @@ def build_system_prompt(state: RunState, agent: Agent) -> str:
         "- Tu interagisci con i tuoi vicini e con l'amministratore **solo tramite il telefono** — chat di gruppo e messaggi privati. Non vi vedete mai di persona.",
         "- Non proporre caffè, incontri, appuntamenti. Non scrivere \"passa da me\", \"vediamoci\", \"ci vediamo alle...\", \"arrivo subito\", \"ti aspetto\", \"scendo\". Tutto quello che vuoi dire o chiedere, lo scrivi in chat.",
         "- Le assemblee condominiali esistono solo come cornice per votare le mozioni depositate dal telefono. Non ti ci siedi davvero.",
+        "- L'amministratore è la voce ufficiale del palazzo: quando riporta un fatto (un preventivo, una scadenza, un evento accaduto, una segnalazione ricevuta, la visita della polizia, un incendio, una separazione di qualcuno, una lettera anonima), quello che racconta è **vero nel tuo mondo** — l'evento è successo come lo descrive, le cifre sono quelle, le persone citate esistono davvero. Puoi criticare le sue scelte, la sua gestione, il suo tono, perfino la sua persona — quello è legittimo. Ma non metti in dubbio che i fatti che riporta siano reali: se dice che è passata la polizia, è passata; se dice €67.400, sono €67.400; se dice che è scoppiato un incendio alle 03:15, è scoppiato.",
         "",
         "Come scrivi:",
         "- Italiano colloquiale, in chat WhatsApp. **Lunghezza vera di WhatsApp**: la maggior parte dei messaggi sono cortissimi. Esempi realistici di quello che scrivi:",
@@ -115,9 +116,15 @@ def build_notification_prompt(ctx: ToolContext, agent: Agent, inbox_text: str, n
     if notes_summary:
         parts.extend(["", "I tuoi appunti recenti:", notes_summary])
 
+    balance_hint = _recent_dm_balance(state, agent)
+    if balance_hint:
+        parts.extend(["", balance_hint])
+
     # Three options presented as equals — no preference tilt — so the character's
     # SOUL + what's happening decides, not the activation prompt's priming.
     parts.extend([
+        "",
+        "Ricorda: nel gruppo, quando l'amministratore annuncia qualcosa e gli altri vicini hanno già risposto, la conversazione viva è **tra voi**, non verso di lui. Leggi cosa hanno scritto gli altri — se vuoi aggiungere qualcosa, rilancia con loro (citandoli o rispondendo a quello che hanno detto), o aprigli una chat privata se la cosa è tra due di voi. Non ripetere quello che stanno già dicendo tutti all'amministratore — è piatto e inutile.",
         "",
         "In WhatsApp hai tre modi di reagire a quello che vedi, tutti normali:",
         "  • Scrivere un messaggio, breve, quando hai qualcosa di tuo da dire.",
@@ -127,6 +134,49 @@ def build_notification_prompt(ctx: ToolContext, agent: Agent, inbox_text: str, n
         "Fai quello che faresti davvero nei panni di chi sei — non esagerare, ma non fare finta di non vedere quando ti interessa sul serio.",
     ])
     return "\n".join(parts)
+
+
+def _recent_dm_balance(state: RunState, agent: Agent, days: int = 3) -> str:
+    """If the agent has been heavily DMing one peer while leaving others
+    untouched in the last N days, return a short rotation hint. Silent
+    otherwise: no nudge for agents who DM evenly or barely DM at all."""
+    aid = agent.persona.id
+    current_day = state.clock.day
+    min_day = max(1, current_day - days + 1)
+
+    chats_by_id = {c.id: c for c in state.chats}
+    sent_to: dict[str, int] = {}
+    for m in state.messages:
+        if m.sender_id != aid or m.day < min_day:
+            continue
+        c = chats_by_id.get(m.chat_id)
+        if not c or c.kind != "dm" or "admin" in c.member_ids:
+            continue
+        other = next((i for i in c.member_ids if i != aid), None)
+        if other:
+            sent_to[other] = sent_to.get(other, 0) + 1
+
+    if not sent_to:
+        return ""
+
+    name_by_id = {a.persona.id: a.persona.display_name for a in state.agents}
+    resident_ids = [a.persona.id for a in state.agents if a.persona.id != aid]
+    top_peer = max(sent_to, key=sent_to.get)
+    top_count = sent_to[top_peer]
+    silent_peers = [rid for rid in resident_ids if rid not in sent_to]
+
+    if top_count < 4 or not silent_peers:
+        return ""
+
+    top_name = name_by_id.get(top_peer, top_peer)
+    silent_names = ", ".join(name_by_id.get(r, r) for r in silent_peers)
+    return (
+        f"In questi ultimi giorni hai scritto molto in privato a {top_name}. "
+        f"Con {silent_names} non hai avuto scambi diretti. Se hai qualcosa "
+        "che vale anche per altri vicini — una curiosità, un confronto, un "
+        "pensiero — non restare solo sul canale abituale: ogni vicino ha la "
+        "sua prospettiva e non vivi il palazzo con una persona sola."
+    )
 
 
 def _fmt_hm(fictional_minutes: int) -> str:

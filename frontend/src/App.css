@@ -36,9 +36,10 @@ button {
 
 /* Layout */
 .app {
-  display: grid;
-  grid-template-rows: auto auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100vh;
+  min-height: 0;
 }
 
 .topbar {
@@ -83,6 +84,8 @@ button {
 .day-badge-tot { opacity: 0.75; font-size: 12px; }
 
 .main {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: 260px 1fr 320px;
   overflow: hidden;
@@ -391,6 +394,12 @@ button {
   font-size: 12px;
   color: #6b4a00;
   text-align: center;
+  animation: statusSlideDown 0.25s ease-out;
+  flex-shrink: 0;
+}
+@keyframes statusSlideDown {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* Speed buttons */
@@ -762,6 +771,18 @@ button {
   padding: 10px 16px;
   font-weight: 600;
 }
+.advance-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 8px;
+  line-height: 1.4;
+  font-style: italic;
+}
+.advance-panel.active .advance-hint {
+  color: #155724;
+  font-style: normal;
+  font-weight: 500;
+}
 .advance-panel.active .advance-btn {
   background: #2e7d32;
   box-shadow: 0 2px 6px rgba(46, 125, 50, 0.3);
@@ -914,6 +935,63 @@ button {
 }
 .god-view-toggle input { cursor: pointer; margin: 0; }
 .god-view-toggle:hover { background: rgba(255,255,255,0.2); }
+
+/* Help button in topbar */
+.help-btn {
+  background: rgba(255,255,255,0.18);
+  border: 1px solid rgba(255,255,255,0.28);
+  color: white;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  transition: background 0.12s, transform 0.1s;
+}
+.help-btn:hover {
+  background: rgba(255,255,255,0.32);
+  transform: scale(1.08);
+}
+.help-btn:focus-visible {
+  outline: 2px solid white;
+  outline-offset: 2px;
+}
+
+/* Help / tutorial modal */
+.help-modal { max-width: 620px; }
+.help-modal .help-section h3 {
+  color: var(--brand-dark);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+.help-list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.help-list li { margin-bottom: 6px; }
+.help-list li::marker { color: var(--brand); font-weight: 700; }
+.help-modal p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text); }
+.help-dismiss {
+  width: auto !important;
+  padding: 10px 28px !important;
+  border-radius: 20px !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  box-shadow: 0 2px 6px rgba(0, 128, 105, 0.3);
+}
+.help-dismiss:hover { box-shadow: 0 4px 12px rgba(0, 128, 105, 0.4); }
 
 /* Clickable resident + alliance rows */
 .resident-card.clickable { cursor: pointer; }

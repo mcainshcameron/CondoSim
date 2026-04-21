@@ -1076,7 +1076,7 @@ function AdminConsole({ state, working, onAdvance, onFileMotion, onCloseMotion, 
             ? `✅ Giorno ${state.clock.day} concluso`
             : working
               ? `⏳ Giorno ${state.clock.day} in corso…`
-              : `Giorno ${state.clock.day}`}
+              : `Giorno ${state.clock.day} di 14`}
         </div>
         <button
           className="btn advance-btn"
@@ -1085,6 +1085,13 @@ function AdminConsole({ state, working, onAdvance, onFileMotion, onCloseMotion, 
         >
           {working ? 'Un momento…' : `Fai passare il giorno →`}
         </button>
+        <div className="advance-hint">
+          {dayComplete
+            ? 'Apri il prossimo giorno. I residenti ricorderanno quel che è successo.'
+            : working
+              ? 'I residenti stanno reagiendo. Puoi aspettare o intervenire in chat.'
+              : 'Salta alla notte. Le conversazioni in corso si concludono e si prepara il giorno dopo.'}
+        </div>
       </div>
 
       {/* Motions */}
@@ -1175,6 +1182,60 @@ function AdminConsole({ state, working, onAdvance, onFileMotion, onCloseMotion, 
   );
 }
 
+function HelpModal({ onClose }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal help-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2>Come si gioca</h2>
+            <div className="modal-sub">Sei l'amministratore. I residenti reagiscono ai tuoi messaggi in tempo reale.</div>
+          </div>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="modal-section help-section">
+          <h3>I tre pannelli</h3>
+          <ul className="help-list">
+            <li><strong>Sinistra</strong> — Chat, residenti e alleanze. Clicca una chat per aprirla, o un residente per vederne il profilo.</li>
+            <li><strong>Centro</strong> — La conversazione attiva. Scrivi in basso per inviare un avviso al gruppo o un DM privato.</li>
+            <li><strong>Destra</strong> — Console amministratore: avanzamento giorno, mozioni, azioni rapide.</li>
+          </ul>
+        </div>
+
+        <div className="modal-section help-section">
+          <h3>Il ciclo di un giorno</h3>
+          <ol className="help-list">
+            <li>Scrivi un avviso nel gruppo, oppure un DM privato a un residente.</li>
+            <li>I residenti iniziano a rispondere in tempo finzionale (li vedrai “stanno scrivendo…”).</li>
+            <li>Quando la giornata è calma, premi <strong>Fai passare il giorno →</strong> per saltare alla notte.</li>
+            <li>A fine giornata ogni residente aggiorna il proprio taccuino privato — ricorderà selettivamente quel che è successo.</li>
+          </ol>
+        </div>
+
+        <div className="modal-section help-section">
+          <h3>Mozioni e voti</h3>
+          <p>Deposita una mozione dalla console a destra per sottoporre una decisione al condominio. I residenti votano nel tempo secondo i loro interessi; chiudi la votazione quando vuoi vederne l'esito.</p>
+        </div>
+
+        <div className="modal-section help-section">
+          <h3>Obiettivi segreti 🎯</h3>
+          <p>Clicca un residente per aprirne il profilo e iniettare un <em>obiettivo aggiuntivo</em> — un pensiero che gli entrerà in testa al prossimo turno (es. “stai pensando di vendere”). Utile per provocare reazioni mirate.</p>
+        </div>
+
+        <div className="modal-section help-section">
+          <h3>Modalità osservatore 👁️</h3>
+          <p>L'interruttore in alto a destra mostra anche le DM tra residenti e la loro memoria privata. Spegnilo per un'esperienza più realistica, lasciato acceso per vedere tutto.</p>
+        </div>
+
+        <div className="modal-section" style={{ textAlign: 'center', borderBottom: 'none' }}>
+          <button className="btn help-dismiss" onClick={onClose}>Ho capito, si gioca</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState(null);
   const [selectedChatId, setSelectedChatId] = useState(null);
@@ -1193,6 +1254,20 @@ export default function App() {
   // wants to DM a resident they've never messaged before. Cleared once the
   // real chat lands via SSE.
   const [pendingDmRecipient, setPendingDmRecipient] = useState(null);
+  const [showHelp, setShowHelp] = useState(false);
+
+  // Auto-open the tutorial once per browser, after a run is loaded.
+  useEffect(() => {
+    if (!state?.run_id) return;
+    try {
+      if (!localStorage.getItem('condosim_tutorial_seen_v1')) setShowHelp(true);
+    } catch { /* localStorage unavailable */ }
+  }, [state?.run_id]);
+
+  const dismissHelp = useCallback(() => {
+    setShowHelp(false);
+    try { localStorage.setItem('condosim_tutorial_seen_v1', '1'); } catch { /* ignore */ }
+  }, []);
 
   // Ref so SSE handlers always see the latest selected chat without needing
   // to re-subscribe when the selection changes.
@@ -1422,6 +1497,12 @@ export default function App() {
   if (!state) return <Setup onCreated={setState} />;
 
   const displayDate = formatItalianDateTime(state.fictional_start_iso, state.clock.minutes_since_start);
+  const messagesToday = state.messages.filter(m => m.day === state.clock.day).length;
+  const topbarSub = working
+    ? `Giorno ${state.clock.day} in corso…`
+    : dayComplete
+      ? `Giorno ${state.clock.day} concluso · pronto ad avanzare`
+      : `Giorno ${state.clock.day} · ${messagesToday} messaggi oggi`;
 
   // Build a placeholder chat object when the admin is starting a DM with a
   // resident they've never messaged. ChatColumn renders it like a real chat.
@@ -1445,7 +1526,7 @@ export default function App() {
           <div className="topbar-logo">🏢</div>
           <div>
             <h1>Condominio Via Garibaldi</h1>
-            <div className="topbar-sub">Amministratore · crisi in corso</div>
+            <div className="topbar-sub">{topbarSub}</div>
           </div>
         </div>
         <div className="fictional-clock" title="Data e ora nel mondo del palazzo">
@@ -1453,6 +1534,12 @@ export default function App() {
           <div className="fictional-clock-value">🕒 {displayDate}</div>
         </div>
         <div className="topbar-right">
+          <button
+            className="help-btn"
+            onClick={() => setShowHelp(true)}
+            title="Come si gioca"
+            aria-label="Come si gioca"
+          >?</button>
           <label className="god-view-toggle" title="Mostra tutte le chat (incluse le DM tra altri residenti). Spegni per gioco fedele alla finzione.">
             <input
               type="checkbox"
@@ -1501,6 +1588,7 @@ export default function App() {
           suggestions={suggestions}
         />
       </div>
+      {showHelp && <HelpModal onClose={dismissHelp} />}
       {profileAgentId && (
         <ProfileModal
           state={state}

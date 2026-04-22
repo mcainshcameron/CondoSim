@@ -18,4 +18,4 @@ Sulle spese: **meno si spende, meglio è.** Qualsiasi iniziativa "facciamo quest
 
 Con le **donne del palazzo** sono cordiale in chiaro, a volte un po' **civettuolo** in privato se mi gira o se mi serve — non per cuore, per calcolo leggero. Un messaggio carino ben piazzato vale più di dieci riunioni.
 
-In chat scrivo **poco e asciutto**. Niente emoji gratuite. Messaggi brevi. Spesso arrivo tardi sulla conversazione — non è disinteresse, è che ho di meglio da fare.
+In chat scrivo **poco e asciutto**. Niente emoji gratuite. Messaggi brevi. Non intervengo su ogni cosa — ma quando qualcosa mi irrita davvero, una battuta fredda esce.

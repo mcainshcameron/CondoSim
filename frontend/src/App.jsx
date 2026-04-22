@@ -512,8 +512,14 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
     return m;
   }, [state.agents]);
 
-  // --- Chat list rows with last message + unread ---
-  const visibleChats = useMemo(() => visibleChatsForAdmin(state, godView), [state, godView]);
+  // Chat list shows only admin-participating conversations (group + admin DMs).
+  // Inter-resident DMs live in the "DM frequenti" section below and open in
+  // the center column when clicked — godView doesn't widen this list.
+  const visibleChats = useMemo(() =>
+    state.chats.filter(c =>
+      c.kind === 'main' || c.kind === 'assembly' || c.member_ids.includes('admin')
+    ),
+  [state.chats]);
 
   const lastMsgByChat = useMemo(() => {
     const m = new Map();
@@ -879,13 +885,12 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
 
   const typingNames = selected ? (typingByChat[selected.id] || []) : [];
 
-  // Auto-scroll to bottom when new messages arrive, and whenever the typing
-  // indicator appears or disappears — otherwise its height change shifts the
-  // last message up/down and makes the conversation hard to follow.
+  // Auto-scroll to bottom on new messages / chat switch. The typing indicator
+  // lives in the header now, so it no longer perturbs message layout.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [selectedMsgs.length, selected?.id, typingNames.length]);
+  }, [selectedMsgs.length, selected?.id]);
 
   // Build a WhatsApp-style chat header line for the current chat.
   const chatHeader = useMemo(() => {
@@ -937,7 +942,14 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
           <Avatar id={selected.id} name={chatHeader.title} size={36} />
           <div className="chat-header-text">
             <div className="chat-header-title">{chatHeader.title}</div>
-            <div className="chat-header-sub">{chatHeader.sub}</div>
+            <div className="chat-header-sub">
+              {typingNames.length > 0 ? (
+                <span className="chat-header-typing">
+                  {typingNames.join(', ')} {typingNames.length === 1 ? 'sta scrivendo' : 'stanno scrivendo'}
+                  <span className="dots"><span>.</span><span>.</span><span>.</span></span>
+                </span>
+              ) : chatHeader.sub}
+            </div>
           </div>
         </div>
       )}
@@ -1001,12 +1013,6 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
             );
           })
         )}
-        {typingNames.length > 0 && (
-          <div className="typing-indicator">
-            {typingNames.join(', ')} {typingNames.length === 1 ? 'sta scrivendo' : 'stanno scrivendo'}
-            <span className="dots"><span>.</span><span>.</span><span>.</span></span>
-          </div>
-        )}
       </div>
       <ChatComposer
         state={state}
@@ -1019,7 +1025,7 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
   );
 }
 
-function AdminConsole({ state, working, onAdvance, onFileMotion, onCloseMotion, dayComplete, suggestions }) {
+function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions }) {
   const [motionTitle, setMotionTitle] = useState('');
   const [motionDesc, setMotionDesc] = useState('');
   const [status, setStatus] = useState('');
@@ -1060,10 +1066,6 @@ function AdminConsole({ state, working, onAdvance, onFileMotion, onCloseMotion, 
     }, 'Votazione chiusa.');
   };
 
-  const handleAdvance = async () => {
-    if (onAdvance) onAdvance();
-  };
-
   const openMotions = (state.motions || []).filter(m => m.status === 'open');
   const closedMotions = (state.motions || []).filter(m => m.status !== 'open').slice(-5);
 
@@ -1071,31 +1073,6 @@ function AdminConsole({ state, working, onAdvance, onFileMotion, onCloseMotion, 
 
   return (
     <div className="console">
-      {/* Manual day advance — prominent when the day is complete */}
-      <div className={`console-section advance-panel ${dayComplete ? 'active' : ''}`}>
-        <div className="advance-label">
-          {dayComplete
-            ? `✅ Giorno ${state.clock.day} concluso`
-            : working
-              ? `⏳ Giorno ${state.clock.day} in corso…`
-              : `Giorno ${state.clock.day} di 14`}
-        </div>
-        <button
-          className="btn advance-btn"
-          onClick={handleAdvance}
-          disabled={working}
-        >
-          {working ? 'Un momento…' : `Fai passare il giorno →`}
-        </button>
-        <div className="advance-hint">
-          {dayComplete
-            ? 'Apri il prossimo giorno. I residenti ricorderanno quel che è successo.'
-            : working
-              ? 'I residenti stanno reagiendo. Puoi aspettare o intervenire in chat.'
-              : 'Salta alla notte. Le conversazioni in corso si concludono e si prepara il giorno dopo.'}
-        </div>
-      </div>
-
       {/* Motions */}
       <div className="console-section">
         <h2>Mozioni {openMotions.length > 0 && <span className="badge">{openMotions.length} aperte</span>}</h2>
@@ -1201,7 +1178,7 @@ function HelpModal({ onClose }) {
           <ul className="help-list">
             <li><strong>Sinistra</strong> — Chat, residenti e alleanze. Clicca una chat per aprirla, o un residente per vederne il profilo.</li>
             <li><strong>Centro</strong> — La conversazione attiva. Scrivi in basso per inviare un avviso al gruppo o un DM privato.</li>
-            <li><strong>Destra</strong> — Console amministratore: avanzamento giorno, mozioni, azioni rapide.</li>
+            <li><strong>Destra</strong> — Console amministratore: mozioni e azioni rapide.</li>
           </ul>
         </div>
 
@@ -1210,7 +1187,7 @@ function HelpModal({ onClose }) {
           <ol className="help-list">
             <li>Scrivi un avviso nel gruppo, oppure un DM privato a un residente.</li>
             <li>I residenti iniziano a rispondere in tempo finzionale (li vedrai “stanno scrivendo…”).</li>
-            <li>Quando la giornata è calma, premi <strong>Fai passare il giorno →</strong> per saltare alla notte.</li>
+            <li>I giorni scorrono da soli: quando la giornata finisce, il prossimo comincia dopo una breve pausa.</li>
             <li>A fine giornata ogni residente aggiorna il proprio taccuino privato — ricorderà selettivamente quel che è successo.</li>
           </ol>
         </div>
@@ -1249,7 +1226,6 @@ export default function App() {
   // Default ON for gameplay clarity. Turn off for fiction-respecting play.
   const [godView, setGodView] = useState(true);
   const [profileAgentId, setProfileAgentId] = useState(null);
-  const [dayComplete, setDayComplete] = useState(false);
   const [unreadByChat, setUnreadByChat] = useState({});
   const [suggestions, setSuggestions] = useState([]);
   // A transient "chat doesn't exist yet" placeholder, used when the admin
@@ -1257,6 +1233,12 @@ export default function App() {
   // real chat lands via SSE.
   const [pendingDmRecipient, setPendingDmRecipient] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
+  // Auto-advance bookkeeping. dayStartedAt is wall-clock ms when day_start
+  // fired; nextAdvanceAt is when the next auto-advance is scheduled to run.
+  const [dayStartedAt, setDayStartedAt] = useState(null);
+  const [nextAdvanceAt, setNextAdvanceAt] = useState(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [paused, setPaused] = useState(false);
 
   // Auto-open the tutorial once per browser, after a run is loaded.
   useEffect(() => {
@@ -1270,6 +1252,38 @@ export default function App() {
     setShowHelp(false);
     try { localStorage.setItem('condosim_tutorial_seen_v1', '1'); } catch { /* ignore */ }
   }, []);
+
+  // Ref lets the auto-advance timer call the latest onAdvance without
+  // re-scheduling every time state changes underneath us.
+  const onAdvanceRef = useRef(null);
+
+  // One-second ticker drives the timer/countdown labels in the topbar.
+  useEffect(() => {
+    if (!state?.run_id) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [state?.run_id]);
+
+  // Schedule the first auto-advance whenever a run is loaded (new or saved).
+  // Subsequent advances are scheduled inside onAdvance's success path, once
+  // the backend POST returns (and the per-run lock has been released).
+  useEffect(() => {
+    if (!state?.run_id || state.ended || working || paused) return;
+    setNextAdvanceAt(Date.now() + 2500);
+  }, [state?.run_id]);
+
+  // Fire the auto-advance once its scheduled time elapses.
+  useEffect(() => {
+    if (!nextAdvanceAt) return;
+    const remaining = nextAdvanceAt - Date.now();
+    const fire = () => {
+      setNextAdvanceAt(null);
+      onAdvanceRef.current?.();
+    };
+    if (remaining <= 0) { fire(); return; }
+    const id = setTimeout(fire, remaining);
+    return () => clearTimeout(id);
+  }, [nextAdvanceAt]);
 
   // Ref so SSE handlers always see the latest selected chat without needing
   // to re-subscribe when the selection changes.
@@ -1366,13 +1380,18 @@ export default function App() {
     es.addEventListener('day_start', (e) => {
       const d = JSON.parse(e.data).data;
       setDayStatus(`Giorno ${d.day} in corso…`);
-      setDayComplete(false);
+      setDayStartedAt(Date.now());
+      setNextAdvanceAt(null);
     });
 
     es.addEventListener('day_end', (e) => {
       const d = JSON.parse(e.data).data;
       setDayStatus(`Giorno ${d.day} concluso: ${d.activations} attivazioni, ${d.total_messages} messaggi totali.`);
-      setDayComplete(true);
+      setDayStartedAt(null);
+      // NB: don't schedule the next advance here — day_end fires BEFORE memory
+      // consolidation runs, and the per-run lock is still held until the POST
+      // response returns. Scheduling next-advance lives in onAdvance's success
+      // path, which only runs after the lock is released.
       // Refresh metadata (clock, trust, motions) but preserve the messages
       // we accumulated via the SSE stream — fetched state may lag by a few
       // hundred ms while memory consolidation finishes server-side.
@@ -1453,16 +1472,39 @@ export default function App() {
 
   const onAdvance = useCallback(async () => {
     if (!state || working) return;
+    setNextAdvanceAt(null);
     setWorking(true);
-    setDayComplete(false);
     setDayStatus(`Avvio giorno ${state.clock.day}…`);
     try {
-      await api.advanceDay(state.run_id);
+      const result = await api.advanceDay(state.run_id);
+      // POST returned => backend lock released, memory consolidation done.
+      // Chain to the next day unless the run ended or we've hit day 14.
+      const finished = result?.state;
+      const nextDay = (finished?.clock?.day ?? state.clock.day) + 1;
+      if (!paused && finished && !finished.ended && nextDay <= 14) {
+        setNextAdvanceAt(Date.now() + 3000);
+      }
     } catch (e) {
       setDayStatus('Errore: ' + String(e));
     } finally {
       setWorking(false);
     }
+  }, [state, working, paused]);
+
+  useEffect(() => { onAdvanceRef.current = onAdvance; }, [onAdvance]);
+
+  // Pause / resume: cancel any pending advance when pausing; when resuming an
+  // idle run, kick off the next day right away.
+  const togglePause = useCallback(() => {
+    setPaused(prev => {
+      const next = !prev;
+      if (next) {
+        setNextAdvanceAt(null);
+      } else if (state && !state.ended && !working && state.clock.day < 14) {
+        setNextAdvanceAt(Date.now() + 500);
+      }
+      return next;
+    });
   }, [state, working]);
 
   const onFileMotion = useCallback(async (title, description) => {
@@ -1500,11 +1542,27 @@ export default function App() {
 
   const displayDate = formatItalianDateTime(state.fictional_start_iso, state.clock.minutes_since_start);
   const messagesToday = state.messages.filter(m => m.day === state.clock.day).length;
-  const topbarSub = working
-    ? `Giorno ${state.clock.day} in corso…`
-    : dayComplete
-      ? `Giorno ${state.clock.day} concluso · pronto ad avanzare`
-      : `Giorno ${state.clock.day} · ${messagesToday} messaggi oggi`;
+  const formatElapsed = (ms) => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  let topbarSub;
+  if (state.ended) {
+    topbarSub = 'Partita conclusa · 14 giorni sono passati';
+  } else if (working) {
+    const timer = dayStartedAt ? ` · ⏱️ ${formatElapsed(nowTick - dayStartedAt)}` : '';
+    const pausedHint = paused ? ' · ⏸ pausa dopo il giorno' : '';
+    topbarSub = `Giorno ${state.clock.day} in corso${timer}${pausedHint}`;
+  } else if (paused) {
+    topbarSub = `Giorno ${state.clock.day} · ⏸ in pausa`;
+  } else if (nextAdvanceAt) {
+    const secs = Math.max(0, Math.ceil((nextAdvanceAt - nowTick) / 1000));
+    topbarSub = state.clock.minutes_since_start === 0
+      ? `Giorno 1 inizia fra ${secs}s…`
+      : `Giorno ${state.clock.day} concluso · prossimo giorno fra ${secs}s…`;
+  } else {
+    topbarSub = `Giorno ${state.clock.day} · ${messagesToday} messaggi oggi`;
+  }
 
   // Build a placeholder chat object when the admin is starting a DM with a
   // resident they've never messaged. ChatColumn renders it like a real chat.
@@ -1536,6 +1594,16 @@ export default function App() {
           <div className="fictional-clock-value">🕒 {displayDate}</div>
         </div>
         <div className="topbar-right">
+          {!state.ended && (
+            <button
+              className={`pause-btn ${paused ? 'paused' : ''}`}
+              onClick={togglePause}
+              title={paused ? 'Riprendi il ciclo automatico dei giorni' : 'Metti in pausa — i giorni smettono di avanzare'}
+              aria-label={paused ? 'Riprendi' : 'Pausa'}
+            >
+              {paused ? '▶ Riprendi' : '⏸ Pausa'}
+            </button>
+          )}
           <button
             className="help-btn"
             onClick={() => setShowHelp(true)}
@@ -1582,11 +1650,8 @@ export default function App() {
         />
         <AdminConsole
           state={state}
-          working={working}
-          onAdvance={onAdvance}
           onFileMotion={onFileMotion}
           onCloseMotion={onCloseMotion}
-          dayComplete={dayComplete}
           suggestions={suggestions}
         />
       </div>

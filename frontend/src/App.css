@@ -341,28 +341,22 @@ button {
 .chat-empty-icon { font-size: 42px; opacity: 0.4; }
 .chat-empty-sub { font-size: 12px; font-style: italic; opacity: 0.75; }
 
-/* Live typing indicator inside a chat */
-.typing-indicator {
-  align-self: flex-start;
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--muted);
+/* Live typing indicator — sits in the chat header sub so its
+   appearance/disappearance never shifts the message list. */
+.chat-header-typing {
+  color: var(--brand);
   font-style: italic;
-  box-shadow: var(--shadow);
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
-.typing-indicator .dots span {
+.chat-header-typing .dots span {
   display: inline-block;
   animation: bounce 1.2s infinite;
   font-weight: bold;
 }
-.typing-indicator .dots span:nth-child(2) { animation-delay: 0.15s; }
-.typing-indicator .dots span:nth-child(3) { animation-delay: 0.3s; }
+.chat-header-typing .dots span:nth-child(2) { animation-delay: 0.15s; }
+.chat-header-typing .dots span:nth-child(3) { animation-delay: 0.3s; }
 @keyframes bounce {
   0%, 60%, 100% { opacity: 0.3; }
   30%          { opacity: 1; }
@@ -747,52 +741,6 @@ button {
   margin-top: 2px;
 }
 
-/* Manual day-advance panel */
-.advance-panel {
-  text-align: center;
-  transition: all 0.25s ease;
-}
-.advance-panel.active {
-  background: linear-gradient(to bottom, #d4f4dd, #c0e8cc);
-  border-bottom: 2px solid #2e7d32;
-}
-.advance-panel .advance-label {
-  font-size: 13px;
-  color: var(--muted);
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-.advance-panel.active .advance-label {
-  color: #155724;
-  font-weight: 600;
-}
-.advance-panel .advance-btn {
-  font-size: 14px;
-  padding: 10px 16px;
-  font-weight: 600;
-}
-.advance-hint {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 8px;
-  line-height: 1.4;
-  font-style: italic;
-}
-.advance-panel.active .advance-hint {
-  color: #155724;
-  font-style: normal;
-  font-weight: 500;
-}
-.advance-panel.active .advance-btn {
-  background: #2e7d32;
-  box-shadow: 0 2px 6px rgba(46, 125, 50, 0.3);
-  animation: pulse-green 2s ease-in-out infinite;
-}
-@keyframes pulse-green {
-  0%, 100% { box-shadow: 0 2px 6px rgba(46, 125, 50, 0.3); }
-  50%      { box-shadow: 0 2px 12px rgba(46, 125, 50, 0.6); }
-}
-
 .console h2 .badge {
   background: var(--brand);
   color: white;
@@ -935,6 +883,27 @@ button {
 }
 .god-view-toggle input { cursor: pointer; margin: 0; }
 .god-view-toggle:hover { background: rgba(255,255,255,0.2); }
+
+/* Pause/resume button in topbar */
+.pause-btn {
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.25);
+  color: white;
+  padding: 5px 12px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  line-height: 1.2;
+  transition: background 0.12s, transform 0.1s;
+}
+.pause-btn:hover { background: rgba(255,255,255,0.28); }
+.pause-btn.paused {
+  background: #fff3cd;
+  color: #6b4a00;
+  border-color: #e5c97a;
+}
+.pause-btn.paused:hover { background: #ffe9a8; }
 
 /* Help button in topbar */
 .help-btn {

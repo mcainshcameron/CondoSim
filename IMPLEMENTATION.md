@@ -130,6 +130,10 @@ The end-of-day diary is written BY THE AGENT with an LLM call, not extracted by 
 
 When the dedup filter catches a near-identical resend, `ctx.done = True` ends the activation — preventing the "tack on a different tail to slip past the filter" workaround. Consecutive-DM and daily-cap blocks just refuse the send; the agent can still do other things.
 
+### 4.7 Auto-advance: await the POST, don't react to `day_end` SSE
+
+Days chain automatically in the frontend. The subtle constraint is that `day_end` SSE is published from *inside* the `advance_day` per-run lock — specifically **before** per-agent memory consolidation runs. A POST fired on `day_end` hits a still-held lock and 409s. The frontend therefore schedules the next advance in `onAdvance`'s success path (after the POST response), never from the `day_end` event handler. Same rule applies to any future auto-looping caller.
+
 ---
 
 ## 5. What's implemented + verified
@@ -167,7 +171,10 @@ When the dedup filter catches a near-identical resend, `ctx.done = True` ends th
 
 ### UI
 
-- WhatsApp-style layout (topbar, resident panel, chat column with main/DM tabs, admin console, alliance panel)
+- WhatsApp-style layout (topbar, left chat+resident panel, chat column, admin console for motions)
+- **Auto-advance days** with ⏸ Pausa / ▶ Riprendi toggle in the topbar and a live mm:ss timer in the topbar sub. Scheduling keyed off the `advance_day` POST response (not `day_end` SSE — see §4.7), so backend memory consolidation completes before the next day starts. Short grace delay on run load, ~3s pause between days.
+- Left chat list scoped to admin-participating chats (main + admin DMs) regardless of Osservatore; inter-resident DMs surface in "DM frequenti" at the bottom and open in the center column when clicked
+- Typing indicator lives in the chat header sub, not the messages list — prevents the last message from being shoved up and down as agents start/stop typing
 - Setup screen with cast preview + admin's opening-message compose
 - Profile modal: admin-goal editor, chat participation summary, trust view, **SOUL.md + MEMORY.md collapsible viewers**
 - SSE-driven live updates: typing indicators, new messages, motion events, day transitions

@@ -129,6 +129,27 @@ MEMORY, not injected narration).
   `motion_closed`, `trust_updated`, `memory_consolidation_start/done`.
 - **Day-end race fix** is invariant: save run BEFORE publishing `day_end` so
   SSE observers see a consistent disk state.
+- **Day-end lock invariant**: `day_end` SSE fires *before* per-agent memory
+  consolidation runs — both happen inside the same `advance_day` lock. Any
+  caller that wants to chain to the next day must await the `advance_day`
+  POST response (lock released, consolidation done), not react to the SSE —
+  a POST fired on `day_end` will 409 against the still-held lock. The
+  frontend auto-advance schedules the next day inside `onAdvance`'s success
+  path for this reason.
+
+### Frontend admin console (`frontend/src/App.jsx`)
+
+- Days advance automatically — no manual "advance day" button. On run load,
+  a short grace delay schedules the first advance; after each day's POST
+  returns, the next advance is scheduled ~3s later. A ⏸ Pausa / ▶ Riprendi
+  toggle in the topbar cancels/resumes the chain. A live mm:ss timer in the
+  topbar sub shows elapsed real time on the current day.
+- Left chat list is scoped to admin-participating chats (main group + admin
+  DMs) regardless of Osservatore toggle. Inter-resident DMs surface in the
+  "DM frequenti" section at the bottom of the left panel and open in the
+  center column when clicked.
+- Typing indicator lives in the chat header sub (not the messages list) so
+  it doesn't shove the last message up and down as it appears/disappears.
 
 ## Conventions
 

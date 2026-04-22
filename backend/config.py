@@ -33,7 +33,8 @@ DAY_END_HOUR = 23
 PER_AGENT_DAILY_SOFT_BUDGET = 5  # messages past this get deprioritized
 MAX_TOOL_CALLS_PER_ACTIVATION = 4  # hard cap on an agent's single wake-up
 CASCADE_MAX_DEPTH = 2  # bounds recursive reaction cascades
-AGENT_TEMPERATURE = 0.85
+AGENT_TEMPERATURE = 1.0  # tool-calling loop: Gemini 3's recommended default; any deviation risks looping
+MEMORY_TEMPERATURE = 1.3  # day_end consolidation: no tools, pure Italian writing — push higher for voice diversity
 AGENT_MAX_TOKENS = 180
 
 # Logging

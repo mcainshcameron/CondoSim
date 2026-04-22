@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import building
-from .config import AGENT_MAX_TOKENS, AGENT_TEMPERATURE, RUNS_DIR
+from .config import AGENT_MAX_TOKENS, MEMORY_TEMPERATURE, RUNS_DIR
 from .events import bus
 from .logging_utils import log, log_error
 from .models import Agent, RunState
@@ -188,7 +188,7 @@ async def _consolidate_one(
         reply = await chat_completion(
             model=agent.model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=AGENT_TEMPERATURE,
+            temperature=MEMORY_TEMPERATURE,
             max_tokens=AGENT_MAX_TOKENS,
             caller=f"memory:{aid}:day{day}",
         )

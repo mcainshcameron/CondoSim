@@ -164,11 +164,24 @@ function Setup({ onCreated }) {
         </div>
 
         <button className="landing-cta" onClick={scrollToSetup}>
-          Entra nel palazzo ▾
+          Entra nel palazzo
         </button>
+        <div
+          className="landing-scroll-hint"
+          onClick={scrollToSetup}
+          aria-hidden="true"
+        >
+          <span>▾</span>
+        </div>
       </section>
 
-      <div id="setup-begin" className="setup-card">
+      <section id="setup-begin" className="setup-break">
+        <div className="setup-break-line" />
+        <div className="setup-break-label">Nuova partita</div>
+        <div className="setup-break-line" />
+      </section>
+
+      <div className="setup-card">
 
         <div className="setup-body">
           <div className="setup-col">
@@ -1304,6 +1317,42 @@ export default function App() {
   // current paused state without re-subscribing every time it changes.
   const pausedRef = useRef(paused);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
+
+  // Watchdog: while we believe a day is in progress, poll the API every 30s
+  // to catch the case where the day actually finished server-side but the
+  // day_done SSE event was dropped (Heroku H18, browser tab throttled,
+  // EventSource not reconnecting cleanly). If the polled state shows the
+  // clock has reached day_end_minutes for the current day OR the run ended,
+  // unstick the UI and chain the next advance — same effect as if day_done
+  // had fired normally. SSE remains the fast path; this is just insurance.
+  useEffect(() => {
+    if (!state?.run_id || !working) return;
+    const runId = state.run_id;
+    const id = setInterval(() => {
+      api.getRun(runId).then(fresh => {
+        // day_end_minutes(d) = (d - 1) * 1440 + 23 * 60. If clock has reached
+        // or passed that, the day's loop has finished server-side.
+        const dayEndMin = (fresh.clock.day - 1) * 1440 + 23 * 60;
+        const dayFinished = fresh.clock.minutes_since_start >= dayEndMin;
+        if (!dayFinished && !fresh.ended) return;
+        // Catch up: merge the state, clear working, schedule next.
+        setState(prev => {
+          if (!prev) return fresh;
+          const byId = new Map(fresh.messages.map(m => [m.id, m]));
+          for (const m of prev.messages) if (!byId.has(m.id)) byId.set(m.id, m);
+          return { ...fresh, messages: Array.from(byId.values()).sort(
+            (a, b) => a.fictional_timestamp_minutes - b.fictional_timestamp_minutes
+          ) };
+        });
+        setWorking(false);
+        setDayStartedAt(null);
+        if (!pausedRef.current && !fresh.ended && fresh.clock.day < 14) {
+          setNextAdvanceAt(Date.now() + 3000);
+        }
+      }).catch(() => {});
+    }, 30000);
+    return () => clearInterval(id);
+  }, [state?.run_id, working]);
 
   // On mount, ask the server whether we already have a valid session cookie
   // (and whether auth is configured at all). Drives the Login gate below.

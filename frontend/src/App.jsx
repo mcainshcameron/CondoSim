@@ -34,7 +34,37 @@ function initialsOf(name) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
+// Residents for whom we have a photoreal portrait PNG in /avatars/.
+const RESIDENT_PORTRAITS = new Set([
+  'conti', 'ferrari', 'greco', 'marchetti', 'romano',
+]);
+
+// For a DM chat, resolve the "other" member id if it's one of ours — lets
+// the chat list / header render that resident's face instead of a generic
+// initials circle for opaque chat ids like `dm_admin_conti_a1b2`.
+function residentIdForChat(chat) {
+  if (!chat || chat.kind !== 'dm' || !chat.member_ids) return null;
+  const other = chat.member_ids.find(
+    mid => mid !== 'admin' && RESIDENT_PORTRAITS.has(mid),
+  );
+  return other || null;
+}
+
 function Avatar({ id, name, size = 36, title }) {
+  const label = title || name;
+  if (RESIDENT_PORTRAITS.has(id)) {
+    return (
+      <img
+        className="avatar avatar-img"
+        src={`/avatars/${id}.png`}
+        alt={name || id}
+        title={label}
+        width={size}
+        height={size}
+        style={{ width: size, height: size }}
+      />
+    );
+  }
   return (
     <div
       className="avatar"
@@ -44,7 +74,7 @@ function Avatar({ id, name, size = 36, title }) {
         background: colorFor(id || name || '?'),
         fontSize: Math.round(size * 0.4),
       }}
-      title={title || name}
+      title={label}
     >
       {initialsOf(name)}
     </div>
@@ -641,7 +671,7 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
               className={`chat-list-row ${isActive ? 'active' : ''} ${unread > 0 ? 'has-unread' : ''}`}
               onClick={() => onSelectChat(chat.id)}
             >
-              <Avatar id={chat.id} name={chat.display_name} size={42} />
+              <Avatar id={residentIdForChat(chat) || chat.id} name={chat.display_name} size={42} />
               <div className="chat-list-main">
                 <div className="chat-list-top">
                   <span className="chat-list-name">{chat.display_name}</span>
@@ -943,7 +973,7 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
           onClick={() => headerClickable && onOpenProfile(dmOtherId)}
           title={headerClickable ? 'Apri profilo' : undefined}
         >
-          <Avatar id={selected.id} name={chatHeader.title} size={36} />
+          <Avatar id={dmOtherId || selected.id} name={chatHeader.title} size={36} />
           <div className="chat-header-text">
             <div className="chat-header-title">{chatHeader.title}</div>
             <div className="chat-header-sub">
@@ -1585,15 +1615,34 @@ export default function App() {
     await api.closeMotion(state.run_id, motionId);
   }, [state]);
 
+  // Optimistically merge the POST response's message into state so the
+  // admin's own send always appears in the UI, even if the message_sent SSE
+  // event is dropped (Heroku H18, mid-reconnect, queue removed during gap).
+  const mergeOwnMessage = useCallback((result) => {
+    const msg = result?.message;
+    if (!msg) return;
+    const chat = result?.chat;
+    setState(prev => {
+      if (!prev) return prev;
+      if (prev.messages.some(m => m.id === msg.id)) return prev;
+      const chats = chat && !prev.chats.some(c => c.id === chat.id)
+        ? [...prev.chats, chat]
+        : prev.chats;
+      return { ...prev, messages: [...prev.messages, msg], chats };
+    });
+  }, []);
+
   const onSendAnnounce = useCallback(async (text) => {
     if (!state) return;
-    await api.announce(state.run_id, text);
-  }, [state?.run_id]);
+    const result = await api.announce(state.run_id, text);
+    mergeOwnMessage(result);
+  }, [state?.run_id, mergeOwnMessage]);
 
   const onSendDm = useCallback(async (recipientId, text) => {
     if (!state) return;
-    await api.sendDm(state.run_id, recipientId, text);
-  }, [state?.run_id]);
+    const result = await api.sendDm(state.run_id, recipientId, text);
+    mergeOwnMessage(result);
+  }, [state?.run_id, mergeOwnMessage]);
 
   // Fetch suggestion chips whenever run state meaningfully changes.
   useEffect(() => {

@@ -1546,6 +1546,14 @@ export default function App() {
       // state, and chains the next advance.
       await api.advanceDay(state.run_id);
     } catch (e) {
+      // 409 means the backend thinks a day is already running. This can
+      // happen if onAdvance fired twice (React state closure lag) or if a
+      // day_done SSE was missed. Treat it as a no-op — the active day will
+      // publish day_done on completion and chain the next advance.
+      if (e?.status === 409) {
+        // Leave the status alone; the in-flight day will update it via SSE.
+        return;
+      }
       setDayStatus('Errore: ' + String(e));
       setWorking(false);
     }

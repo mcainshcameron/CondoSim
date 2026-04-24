@@ -1,24 +1,36 @@
 """Postgres persistence for runs."""
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
+
 from .db import pool
 from .models import RunState
 
 
+# Per-run save mutex. Prevents concurrent save_run calls (scheduler batch +
+# admin endpoint hitting at the same time) from overwriting each other: both
+# coroutines call state.model_dump_json() synchronously, then await the DB
+# write; whoever finishes writing LAST wins. The mutex serializes saves so
+# the last serializer (inside the lock) always captures the combined state.
+_save_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
 async def save_run(state: RunState) -> None:
-    payload = state.model_dump_json()
-    async with pool().acquire() as conn:
-        await conn.execute(
-            """
-            insert into runs (run_id, state, updated_at)
-            values ($1, $2::jsonb, now())
-            on conflict (run_id) do update
-              set state = excluded.state,
-                  updated_at = now()
-            """,
-            state.run_id,
-            payload,
-        )
+    async with _save_locks[state.run_id]:
+        payload = state.model_dump_json()
+        async with pool().acquire() as conn:
+            await conn.execute(
+                """
+                insert into runs (run_id, state, updated_at)
+                values ($1, $2::jsonb, now())
+                on conflict (run_id) do update
+                  set state = excluded.state,
+                      updated_at = now()
+                """,
+                state.run_id,
+                payload,
+            )
 
 
 async def load_run(run_id: str) -> RunState | None:

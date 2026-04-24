@@ -56,7 +56,7 @@ function Avatar({ id, name, size = 36, title }) {
     return (
       <img
         className="avatar avatar-img"
-        src={`/avatars/${id}.png`}
+        src={`/avatars/${id}.webp`}
         alt={name || id}
         title={label}
         width={size}
@@ -126,26 +126,49 @@ function Setup({ onCreated }) {
     { id: 'romano',    name: 'Giulia Romano',     sub: 'int. 4C · designer, appena comprato' },
   ];
 
+  const scrollToSetup = () => {
+    const el = document.getElementById('setup-begin');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <div className="setup-page">
-      <div className="setup-card">
-        <div className="setup-hero">
-          <div className="setup-hero-logo">🏢</div>
-          <div className="setup-hero-text">
-            <h1>Condominio Via Garibaldi</h1>
-            <div className="setup-hero-sub">
-              Sei il nuovo amministratore. Cinque residenti, una crisi,
-              quattordici giorni per riuscire a convincerli.
-            </div>
-          </div>
-          <div className="setup-hero-meta">
-            <span>🇮🇹 Italiano</span>
-            <span>·</span>
-            <span>14 giorni</span>
-            <span>·</span>
-            <span>5 residenti</span>
+      <section className="landing-hero">
+        <img
+          className="landing-bg"
+          src="/hero/skyline.webp"
+          alt=""
+          fetchPriority="high"
+        />
+        <div className="landing-dim" aria-hidden="true" />
+
+        <div className="landing-title-wrap">
+          <h1 className="landing-title">CondoSim</h1>
+          <div className="landing-subtitle">Condominio Via Garibaldi</div>
+          <div className="landing-tagline">
+            Cinque residenti. Una chat. Un amministratore.
           </div>
         </div>
+
+        <div className="landing-cutouts" aria-hidden="true">
+          <img className="cutout cutout-conti"
+               src="/hero/conti_cutout.webp" alt="" loading="lazy" />
+          <img className="cutout cutout-marchetti"
+               src="/hero/marchetti_cutout.webp" alt="" loading="lazy" />
+          <img className="cutout cutout-greco"
+               src="/hero/greco_cutout.webp" alt="" loading="lazy" />
+          <img className="cutout cutout-ferrari"
+               src="/hero/ferrari_cutout.webp" alt="" loading="lazy" />
+          <img className="cutout cutout-romano"
+               src="/hero/romano_cutout.webp" alt="" />
+        </div>
+
+        <button className="landing-cta" onClick={scrollToSetup}>
+          Entra nel palazzo ▾
+        </button>
+      </section>
+
+      <div id="setup-begin" className="setup-card">
 
         <div className="setup-body">
           <div className="setup-col">

@@ -985,19 +985,168 @@ button {
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05);
 }
 
+/* Photoreal portrait variant — crops the 1:1 PNG into a clean circle. */
+.avatar-img {
+  object-fit: cover;
+  background: #e8edf1;  /* shows briefly while the image is loading */
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.08);
+}
+
 /* ============================================================
-   Setup / home screen
+   Setup / home screen — GTA-style landing hero + form card below
    ============================================================ */
 .setup-page {
   min-height: 100vh;
-  background:
-    radial-gradient(1200px 600px at 20% 10%, rgba(0, 128, 105, 0.12), transparent 60%),
-    radial-gradient(900px 500px at 85% 90%, rgba(0, 128, 105, 0.08), transparent 60%),
-    #f0f2f5;
+  background: #1a1418;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 24px;
+}
+
+/* Immersive hero — skyline backdrop, big title, 5 cutouts overlaid, CTA */
+.landing-hero {
+  position: relative;
+  width: 100%;
+  height: 92vh;
+  min-height: 640px;
+  overflow: hidden;
+  background: #2a1c1f;
+  isolation: isolate;
+}
+.landing-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  z-index: 0;
+  user-select: none;
+  pointer-events: none;
+}
+/* Dim layer: darken top (for title legibility) and bottom (for CTA), leave
+   mid-band bright so the sky color still pops. */
+.landing-dim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    linear-gradient(to bottom,
+      rgba(12, 8, 10, 0.55) 0%,
+      rgba(12, 8, 10, 0.1) 28%,
+      rgba(12, 8, 10, 0.0) 55%,
+      rgba(12, 8, 10, 0.55) 100%);
+}
+
+.landing-title-wrap {
+  position: absolute;
+  top: 6vh;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  text-align: center;
+  pointer-events: none;
+  width: 92%;
+}
+.landing-title {
+  margin: 0;
+  font-family: 'Anton', 'Bebas Neue', 'Impact', sans-serif;
+  font-weight: 400;
+  font-size: clamp(68px, 14vw, 200px);
+  line-height: 0.88;
+  letter-spacing: 0.02em;
+  color: #fff3d9;
+  text-transform: uppercase;
+  text-shadow:
+    0 2px 0 rgba(0,0,0,0.35),
+    0 6px 24px rgba(0,0,0,0.45);
+  -webkit-text-stroke: 1.5px rgba(18, 10, 6, 0.85);
+}
+.landing-subtitle {
+  margin-top: 6px;
+  font-family: 'Bebas Neue', 'Anton', sans-serif;
+  font-size: clamp(14px, 2vw, 22px);
+  letter-spacing: 0.35em;
+  color: rgba(255, 240, 215, 0.92);
+  text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+}
+.landing-tagline {
+  margin-top: 14px;
+  font-size: clamp(13px, 1.2vw, 15px);
+  font-style: italic;
+  color: rgba(255, 235, 210, 0.82);
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.7);
+}
+
+/* Cutouts — absolute-positioned, anchored to bottom of hero. Heights in
+   vh so they scale with viewport; z-index puts Romano front-center. */
+.landing-cutouts {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+.cutout {
+  position: absolute;
+  bottom: 0;
+  height: 50vh;
+  width: auto;
+  user-select: none;
+  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.45));
+}
+.cutout-conti     { left: 2%;    height: 48vh; z-index: 2; }
+.cutout-marchetti { left: 18%;   height: 46vh; z-index: 1;
+                    filter: drop-shadow(0 8px 10px rgba(0,0,0,0.5)) brightness(0.88); }
+.cutout-ferrari   { left: 60%;   height: 50vh; z-index: 3; }
+.cutout-greco     { right: 3%;   height: 56vh; z-index: 4; }
+.cutout-romano    { left: 50%;   transform: translateX(-50%);
+                    height: 68vh; z-index: 6; }
+
+.landing-cta {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 11;
+  padding: 14px 34px;
+  font-family: 'Bebas Neue', 'Anton', sans-serif;
+  font-size: 18px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #1a1210;
+  background: linear-gradient(180deg, #ffd37a, #e0a845);
+  border: 1.5px solid rgba(0,0,0,0.45);
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow:
+    0 6px 0 rgba(0,0,0,0.35),
+    0 14px 24px rgba(0,0,0,0.4);
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+.landing-cta:hover {
+  transform: translate(-50%, -1px);
+  box-shadow:
+    0 7px 0 rgba(0,0,0,0.35),
+    0 16px 26px rgba(0,0,0,0.45);
+}
+.landing-cta:active {
+  transform: translate(-50%, 2px);
+  box-shadow:
+    0 3px 0 rgba(0,0,0,0.35),
+    0 6px 12px rgba(0,0,0,0.35);
+}
+
+/* On narrow screens, shrink the cutout row — otherwise they stack and
+   overlap the title. Hide the background cast and keep Romano as the
+   poster child. */
+@media (max-width: 720px) {
+  .cutout-conti, .cutout-marchetti, .cutout-greco, .cutout-ferrari {
+    display: none;
+  }
+  .cutout-romano { height: 58vh; }
+  .landing-title { font-size: 18vw; }
 }
 
 .setup-card {
@@ -1008,52 +1157,9 @@ button {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 48px);
-}
-
-/* Hero strip (green WhatsApp-style header) */
-.setup-hero {
-  background: linear-gradient(135deg, var(--brand), var(--brand-dark));
-  color: white;
-  padding: 22px 28px;
-  display: grid;
-  grid-template-columns: 54px 1fr auto;
-  gap: 16px;
-  align-items: center;
-}
-.setup-hero-logo {
-  width: 54px;
-  height: 54px;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.15);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 28px;
-}
-.setup-hero h1 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
-.setup-hero-sub {
-  font-size: 13px;
-  margin-top: 3px;
-  opacity: 0.9;
-  line-height: 1.4;
-  max-width: 520px;
-}
-.setup-hero-meta {
-  font-size: 11px;
-  opacity: 0.85;
-  background: rgba(255,255,255,0.12);
-  padding: 6px 12px;
-  border-radius: 999px;
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  white-space: nowrap;
+  margin: -40px 24px 48px;  /* pull the card up over the hero's bottom edge */
+  position: relative;
+  z-index: 20;
 }
 
 /* Body: two columns, scrolls if viewport is small */

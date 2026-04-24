@@ -7,6 +7,12 @@ import Login from './Login.jsx';
 // api.js — see api.js for the env var.
 const BACKEND = apiBase;
 
+// Minimum gap between two consecutive resident messages rendering in the
+// chat. Bursts (whole batch arriving at once) get spread out so the user
+// can read them. Admin's own messages still render instantly. Tweak here
+// if you want a slower/faster cadence.
+const MESSAGE_RENDER_GAP_MS = 3000;
+
 function formatItalianDateTime(fictionalStartIso, minutesSinceStart) {
   const base = new Date(fictionalStartIso);
   const dt = new Date(base.getTime() + minutesSinceStart * 60 * 1000);
@@ -1318,6 +1324,11 @@ export default function App() {
   const pausedRef = useRef(paused);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
 
+  // Wall-clock ms when the next resident message is allowed to render.
+  // The message_sent SSE handler reads/writes this to spread bursts out by
+  // MESSAGE_RENDER_GAP_MS so the chat is readable instead of flashing.
+  const nextRenderSlotRef = useRef(0);
+
   // Watchdog: while we believe a day is in progress, poll the API every 30s
   // to catch the case where the day actually finished server-side but the
   // day_done SSE event was dropped (Heroku H18, browser tab throttled,
@@ -1489,22 +1500,23 @@ export default function App() {
       }).catch(() => {});
     });
 
-    es.addEventListener('message_sent', (e) => {
-      const payload = JSON.parse(e.data).data;
+    // Render a message_sent payload into state. Pure side-effect — same
+    // logic for both the immediate path (admin) and the delayed path
+    // (residents). Re-checking dedup inside setState is important because
+    // the optimistic-merge or a watchdog refetch may have already inserted
+    // this message id between event arrival and our scheduled render.
+    const renderIncomingMessage = (payload) => {
       const msg = payload.message;
       let isNewToState = false;
       setState(prev => {
         if (!prev) return prev;
         if (prev.messages.some(m => m.id === msg.id)) return prev;
         isNewToState = true;
-        // Also merge any new chat if this is a freshly-created DM/group
         const chats = payload.chat && !prev.chats.some(c => c.id === payload.chat.id)
           ? [...prev.chats, payload.chat]
           : prev.chats;
         return { ...prev, messages: [...prev.messages, { ...msg, isNew: true }], chats };
       });
-      // Bump unread count if the message is in a chat the user isn't currently
-      // looking at, and it isn't the admin's own message.
       if (isNewToState
           && msg.sender_kind !== 'admin'
           && msg.chat_id !== selectedChatIdRef.current) {
@@ -1512,6 +1524,29 @@ export default function App() {
           ...prev,
           [msg.chat_id]: (prev[msg.chat_id] || 0) + 1,
         }));
+      }
+    };
+
+    es.addEventListener('message_sent', (e) => {
+      const payload = JSON.parse(e.data).data;
+      const msg = payload.message;
+      // Admin's own send: render instantly (their action, no need to pace).
+      if (msg.sender_kind === 'admin') {
+        renderIncomingMessage(payload);
+        return;
+      }
+      // Resident sends: claim the next "slot" so consecutive resident
+      // messages from the same SSE burst spread out by MESSAGE_RENDER_GAP_MS.
+      // The slot reservation is an upper bound — if no one's sending, the
+      // ref stays in the past and the next message renders immediately.
+      const now = Date.now();
+      const slot = Math.max(now, nextRenderSlotRef.current);
+      nextRenderSlotRef.current = slot + MESSAGE_RENDER_GAP_MS;
+      const delay = slot - now;
+      if (delay <= 0) {
+        renderIncomingMessage(payload);
+      } else {
+        setTimeout(() => renderIncomingMessage(payload), delay);
       }
     });
 

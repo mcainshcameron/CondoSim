@@ -1,19 +1,36 @@
 """FastAPI app exposing the admin console + scheduler."""
 from __future__ import annotations
 
+import asyncio
+import hmac
 import random
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from uuid import uuid4
 
-import asyncio
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from . import memory
-from .config import BACKEND_PORT, FRONTEND_ORIGINS, HOST
+from .config import (
+    ADMIN_PASSWORD,
+    BACKEND_PORT,
+    DISABLED,
+    HOST,
+    PROJECT_ROOT,
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_SECURE,
+    SESSION_MAX_AGE_SECONDS,
+    SESSION_SECRET,
+)
+from .db import close_pool, init_pool
 from .dials import apply_trust_from_votes
 from .events import bus
 from .events_pool import compute_suggestions
@@ -24,15 +41,99 @@ from .scheduler import active_loop, advance_to_next_day, day_end_minutes, day_st
 from .storage import list_runs, load_run, save_run
 
 
-app = FastAPI(title="Condominio")
+# ---------------------------------------------------------------------------
+# Lifespan: open Postgres pool on startup, close on shutdown
+# ---------------------------------------------------------------------------
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_pool()
+    try:
+        yield
+    finally:
+        await close_pool()
+
+
+app = FastAPI(title="Condominio", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter (per-IP). slowapi installs an exception handler that returns
+# 429 when a route's limit is exceeded.
+# ---------------------------------------------------------------------------
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# ---------------------------------------------------------------------------
+# Auth + kill switch
+# ---------------------------------------------------------------------------
+
+# Session cookie signer. itsdangerous wraps the payload with an HMAC + a
+# timestamp so we can both verify integrity and expire old cookies. The
+# salt is just a namespace to keep these tokens distinct from any other
+# itsdangerous use in the project.
+_serializer = URLSafeTimedSerializer(
+    SESSION_SECRET or "dev-only-insecure-secret",
+    salt="condosim-session",
 )
+
+# /api/* paths that bypass the auth gate. Login itself can't require auth
+# (chicken-and-egg); health is used by the frontend to discover whether
+# the user already has a valid cookie.
+_PUBLIC_API_PATHS = frozenset({"/api/health", "/api/login", "/api/logout"})
+
+
+def _auth_required() -> bool:
+    """Auth is opt-in: only enforced when BOTH ADMIN_PASSWORD and
+    SESSION_SECRET are set. Leaving one unset means "open beta / public
+    demo" — anyone can use the site. The €10 OpenRouter cap + per-IP rate
+    limits are the financial safety net in that mode.
+    """
+    return bool(ADMIN_PASSWORD and SESSION_SECRET)
+
+
+def _is_authenticated(request: Request) -> bool:
+    """True iff the request carries a valid, non-expired session cookie
+    — OR auth is disabled entirely on the server."""
+    if not _auth_required():
+        return True
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        return False
+    try:
+        _serializer.loads(token, max_age=SESSION_MAX_AGE_SECONDS)
+        return True
+    except (BadSignature, SignatureExpired):
+        return False
+
+
+@app.middleware("http")
+async def auth_kill_switch_mw(request: Request, call_next):
+    path = request.url.path
+    # Non-API paths (the static SPA) are never gated.
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    # Kill switch: stops every /api/* except /api/health so an operator
+    # can flip a config var to halt all LLM-spending endpoints in seconds.
+    if DISABLED and path != "/api/health":
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Servizio temporaneamente disattivato."},
+        )
+    if path in _PUBLIC_API_PATHS:
+        return await call_next(request)
+    # If auth isn't configured, let all /api/* through.
+    if not _auth_required():
+        return await call_next(request)
+    if not _is_authenticated(request):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Non autorizzato."},
+        )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +171,8 @@ class AgentGoalPayload(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_run(run_id: str) -> RunState:
-    state = load_run(run_id)
+async def _get_run(run_id: str) -> RunState:
+    state = await load_run(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return state
@@ -108,13 +209,51 @@ def _append_admin_message(state: RunState, chat_id: str, text: str, audience: li
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
-def health():
+def health(request: Request):
+    return {
+        "ok": True,
+        "authenticated": _is_authenticated(request),
+        "auth_configured": _auth_required(),
+        "disabled": DISABLED,
+    }
+
+
+class LoginPayload(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+@limiter.limit("10/minute")
+async def api_login(request: Request, response: Response, payload: LoginPayload):
+    if not ADMIN_PASSWORD or not SESSION_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Auth non configurata: ADMIN_PASSWORD o SESSION_SECRET mancanti.",
+        )
+    if not hmac.compare_digest(payload.password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=401, detail="Password errata.")
+    token = _serializer.dumps({"u": "admin"})
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+    return {"ok": True}
+
+
+@app.post("/api/logout")
+async def api_logout(response: Response):
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"ok": True}
 
 
 @app.get("/api/runs")
-def api_list_runs():
-    return {"runs": list_runs()}
+async def api_list_runs():
+    return {"runs": await list_runs()}
 
 
 class CreateRunPayload(BaseModel):
@@ -123,13 +262,14 @@ class CreateRunPayload(BaseModel):
 
 
 @app.post("/api/runs")
-def api_create_run(payload: CreateRunPayload):
+@limiter.limit("5/minute")
+async def api_create_run(request: Request, payload: CreateRunPayload):
     try:
         state = build_run_state(building_id=payload.building_id, opening_text=payload.opening_text)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    memory.initialize_run_memory(state)
-    save_run(state)
+    await save_run(state)
+    await memory.initialize_run_memory(state)
     return state.model_dump()
 
 
@@ -140,35 +280,74 @@ def api_default_opening():
 
 
 @app.get("/api/runs/{run_id}")
-def api_get_run(run_id: str):
-    return _get_run(run_id).model_dump()
+async def api_get_run(run_id: str):
+    state = await _get_run(run_id)
+    return state.model_dump()
+
+
+async def _run_day_bg(run_id: str, lock: asyncio.Lock) -> None:
+    """Execute a day in the background. Always publishes a `day_done` SSE
+    event and releases the lock — so a crashed or stuck day still unblocks
+    the next advance instead of wedging the run forever.
+
+    `advance_to_next_day` saves the run + runs memory consolidation
+    internally (see scheduler.DayLoop.run); this helper just shepherds
+    errors and signals completion.
+    """
+    success = False
+    final_day: int | None = None
+    try:
+        state = await load_run(run_id)
+        if state is None:
+            log_error("api", f"_run_day_bg: run {run_id} not found")
+            return
+        if state.ended:
+            log("api", f"_run_day_bg: run {run_id} already ended, skipping")
+            return
+        messages_before = len(state.messages)
+        log("api", f"advance_day(bg) run={run_id} from day={state.clock.day}")
+        try:
+            await advance_to_next_day(state)
+        except Exception as exc:
+            log_error("api", f"advance_day(bg) failed: {exc!r}")
+            bus().publish(run_id, "error", {"message": f"advance_day failed: {exc}"})
+            return
+        success = True
+        final_day = state.clock.day
+        new_msgs = len(state.messages) - messages_before
+        log("api", f"advance_day(bg) done. {new_msgs} new msgs. Now day {final_day}.")
+    finally:
+        # day_done is the chain trigger — frontend listens for this to
+        # schedule the next advance. Fire it BEFORE releasing the lock so
+        # a frontend POST that races with day_done won't beat the release
+        # and 409. (We publish first; subscribers receive asynchronously.)
+        bus().publish(run_id, "day_done", {"ok": success, "day": final_day})
+        if lock.locked():
+            lock.release()
 
 
 @app.post("/api/runs/{run_id}/advance_day")
-async def api_advance_day(run_id: str):
-    # Per-run lock: reject the second click if a day is already advancing.
+@limiter.limit("30/minute")
+async def api_advance_day(request: Request, run_id: str):
+    """Kick off the next fictional day as a background task and return 202.
+
+    The day itself can take 60–200s (full LLM cascade), which would blow
+    Heroku's 30s HTTP timeout if we awaited it inline. The frontend listens
+    for the `day_done` SSE event to know the day finished and to chain the
+    next advance.
+    """
     lock = bus().lock(run_id)
     if lock.locked():
         raise HTTPException(
             status_code=409,
             detail="Un giorno è già in corso. Attendi che finisca prima di avanzare."
         )
-    async with lock:
-        state = _get_run(run_id)
-        if state.ended:
-            return {"ok": False, "reason": "La partita è già conclusa.", "state": state.model_dump()}
-        messages_before = len(state.messages)
-        log("api", f"advance_day run={run_id} from day={state.clock.day}")
-        try:
-            await advance_to_next_day(state)
-        except Exception as exc:
-            log_error("api", f"advance_day failed: {exc!r}")
-            bus().publish(run_id, "error", {"message": f"advance_day failed: {exc}"})
-            raise HTTPException(status_code=500, detail=f"advance_day failed: {exc}")
-        save_run(state)
-        new_msgs = len(state.messages) - messages_before
-        log("api", f"advance_day done. Produced {new_msgs} new messages. Now on day {state.clock.day}.")
-        return {"ok": True, "new_messages": new_msgs, "state": state.model_dump()}
+    state = await _get_run(run_id)
+    if state.ended:
+        return {"ok": False, "reason": "La partita è già conclusa.", "state": state.model_dump()}
+    await lock.acquire()
+    asyncio.create_task(_run_day_bg(run_id, lock))
+    return {"ok": True, "status": "running"}
 
 
 # Pre-baked admin quick actions. action_id -> (label, main-chat body)
@@ -199,8 +378,8 @@ QUICK_ACTIONS = {
 
 
 @app.post("/api/runs/{run_id}/admin/quick_action")
-def api_quick_action(run_id: str, payload: QuickActionPayload):
-    state = _get_run(run_id)
+async def api_quick_action(run_id: str, payload: QuickActionPayload):
+    state = await _get_run(run_id)
     loop = active_loop(run_id)
     if loop is not None:
         state = loop.state
@@ -214,13 +393,13 @@ def api_quick_action(run_id: str, payload: QuickActionPayload):
     bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
     if loop is not None:
         loop.schedule_reactions(msg, depth=0, force=True)
-    save_run(state)
+    await save_run(state)
     return {"ok": True, "message": msg.model_dump()}
 
 
 @app.get("/api/runs/{run_id}/suggestions")
-def api_run_suggestions(run_id: str):
-    state = _get_run(run_id)
+async def api_run_suggestions(run_id: str):
+    state = await _get_run(run_id)
     loop = active_loop(run_id)
     if loop is not None:
         state = loop.state
@@ -236,8 +415,8 @@ def api_list_quick_actions():
 
 
 @app.post("/api/runs/{run_id}/motions")
-def api_file_motion(run_id: str, payload: MotionPayload):
-    state = _get_run(run_id)
+async def api_file_motion(run_id: str, payload: MotionPayload):
+    state = await _get_run(run_id)
     loop = active_loop(run_id)
     if loop is not None:
         state = loop.state
@@ -265,33 +444,33 @@ def api_file_motion(run_id: str, payload: MotionPayload):
     bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
     if loop is not None:
         loop.schedule_reactions(msg, depth=0, force=True)
-    save_run(state)
+    await save_run(state)
     return {"ok": True, "motion": motion.model_dump()}
 
 
 @app.get("/api/runs/{run_id}/agents/{agent_id}/soul")
-def api_get_agent_soul(run_id: str, agent_id: str):
+async def api_get_agent_soul(run_id: str, agent_id: str):
     """Return the agent's immutable SOUL.md as raw markdown."""
-    state = _get_run(run_id)
+    state = await _get_run(run_id)
     if not any(a.persona.id == agent_id for a in state.agents):
         raise HTTPException(status_code=404, detail="Residente non trovato")
     return {"content": memory.read_soul(state, agent_id)}
 
 
 @app.get("/api/runs/{run_id}/agents/{agent_id}/memory")
-def api_get_agent_memory(run_id: str, agent_id: str):
-    """Return the agent's growing MEMORY.md (bio seed + day-end diary entries)."""
-    state = _get_run(run_id)
+async def api_get_agent_memory(run_id: str, agent_id: str):
+    """Return the agent's growing MEMORY (bio seed + day-end diary entries)."""
+    state = await _get_run(run_id)
     if not any(a.persona.id == agent_id for a in state.agents):
         raise HTTPException(status_code=404, detail="Residente non trovato")
-    return {"content": memory.read_memory(state, agent_id)}
+    return {"content": await memory.read_memory(state, agent_id)}
 
 
 @app.put("/api/runs/{run_id}/agents/{agent_id}/goal")
-def api_set_agent_goal(run_id: str, agent_id: str, payload: AgentGoalPayload):
+async def api_set_agent_goal(run_id: str, agent_id: str, payload: AgentGoalPayload):
     """Admin sets an additional goal that the agent internalises as their own
     in the next activation. Framed in-fiction, never as 'admin said X'."""
-    state = _get_run(run_id)
+    state = await _get_run(run_id)
     loop = active_loop(run_id)
     if loop is not None:
         state = loop.state
@@ -303,13 +482,13 @@ def api_set_agent_goal(run_id: str, agent_id: str, payload: AgentGoalPayload):
         "agent_id": agent_id,
         "has_goal": bool(agent.admin_goal),
     })
-    save_run(state)
+    await save_run(state)
     return {"ok": True, "agent_id": agent_id, "goal": agent.admin_goal}
 
 
 @app.post("/api/runs/{run_id}/motions/{motion_id}/close")
-def api_close_motion(run_id: str, motion_id: str):
-    state = _get_run(run_id)
+async def api_close_motion(run_id: str, motion_id: str):
+    state = await _get_run(run_id)
     loop = active_loop(run_id)
     if loop is not None:
         state = loop.state
@@ -344,7 +523,7 @@ def api_close_motion(run_id: str, motion_id: str):
     msg = _append_admin_message(state, "main", body, audience)
     bus().publish(run_id, "motion_closed", {"motion": motion.model_dump()})
     bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
-    save_run(state)
+    await save_run(state)
     return {"ok": True, "motion": motion.model_dump()}
 
 
@@ -386,8 +565,8 @@ def api_debug_logs(n: int = 300):
 
 
 @app.post("/api/runs/{run_id}/admin/announce")
-def api_admin_announce(run_id: str, payload: AnnouncePayload):
-    state = _get_run(run_id)
+async def api_admin_announce(run_id: str, payload: AnnouncePayload):
+    state = await _get_run(run_id)
     if not payload.text.strip():
         raise HTTPException(status_code=400, detail="Messaggio vuoto")
     # If a day loop is currently running, operate on ITS state instance so
@@ -402,13 +581,13 @@ def api_admin_announce(run_id: str, payload: AnnouncePayload):
     # always gets responses rather than being filtered by probability rolls.
     if loop is not None:
         loop.schedule_reactions(msg, depth=0, force=True)
-    save_run(state)
+    await save_run(state)
     return {"ok": True, "message": msg.model_dump()}
 
 
 @app.post("/api/runs/{run_id}/admin/dm")
-def api_admin_dm(run_id: str, payload: DMPayload):
-    state = _get_run(run_id)
+async def api_admin_dm(run_id: str, payload: DMPayload):
+    state = await _get_run(run_id)
     loop = active_loop(run_id)
     if loop is not None:
         state = loop.state
@@ -440,8 +619,22 @@ def api_admin_dm(run_id: str, payload: DMPayload):
     # from the recipient, not a probability roll.
     if loop is not None:
         loop.schedule_reactions(msg, depth=0, force=True)
-    save_run(state)
+    await save_run(state)
     return {"ok": True, "message": msg.model_dump()}
+
+
+# ---------------------------------------------------------------------------
+# Static SPA mount. Runs LAST so /api/* routes are matched first. Heroku
+# build runs `npm run build` which writes to frontend/dist/. In local dev
+# without that build, the mount is skipped and the user runs `vite dev`
+# on the side.
+# ---------------------------------------------------------------------------
+
+_dist_dir = PROJECT_ROOT / "frontend" / "dist"
+if _dist_dir.exists():
+    app.mount("/", StaticFiles(directory=str(_dist_dir), html=True), name="spa")
+else:
+    log("server", f"frontend/dist not found at {_dist_dir}; skipping SPA mount (dev mode)")
 
 
 def main() -> None:

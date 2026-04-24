@@ -9,3 +9,10 @@ dist/
 .vite/
 .DS_Store
 .claude/settings.local.json
+
+# Local Supabase credentials — NEVER commit
+/supabase
+supabase_info.txt
+
+# Heroku build artifacts
+frontend/dist/

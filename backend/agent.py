@@ -16,8 +16,8 @@ from .tools import TOOL_SCHEMAS, ToolContext, dispatch_tool, contains_forbidden
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(state: RunState, agent: Agent) -> str:
-    """Assemble the system prompt from SOUL.md + MEMORY.md plus minimal rules.
+async def build_system_prompt(state: RunState, agent: Agent) -> str:
+    """Assemble the system prompt from SOUL + MEMORY plus minimal rules.
 
     SOUL and MEMORY are framed as the agent's own private notebook rather
     than external instructions. Everything else (rules about tone, history,
@@ -25,7 +25,7 @@ def build_system_prompt(state: RunState, agent: Agent) -> str:
     """
     p = agent.persona
     soul = memory.read_soul(state, p.id)
-    memory_text = memory.read_memory(state, p.id)
+    memory_text = await memory.read_memory(state, p.id)
 
     lines = [
         f"Sei {p.display_name}. Vivi in {p.unit} del Condominio Via Garibaldi, a Milano.",
@@ -307,7 +307,7 @@ async def activate_agent(
         current_fictional_minutes=fictional_minutes_now,
     )
 
-    system_prompt = build_system_prompt(state, agent)
+    system_prompt = await build_system_prompt(state, agent)
     inbox_text = dispatch_tool(ctx, "read_inbox", {})
     notes_summary = _summarize_notes(agent)
     user_prompt = build_notification_prompt(ctx, agent, inbox_text, notes_summary)

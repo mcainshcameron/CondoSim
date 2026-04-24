@@ -18,42 +18,51 @@ Drama emerges from **flawed character SOULs** + **accumulated MEMORY** + **whate
 
 ```
 backend/
-  main.py           # FastAPI app: run CRUD, advance-day, admin actions, SSE
+  main.py           # FastAPI app: run CRUD, advance-day, admin actions, SSE, auth, rate limits, static SPA mount
   building.py       # Generic building loader: load_building(id), build_run_state
   scheduler.py      # DayLoop: engagement rolls → priority queue → parallel activations
-  agent.py          # build_system_prompt, build_notification_prompt, activate_agent
-  memory.py         # read_soul / read_memory, initialize_run_memory, consolidate_day
+  agent.py          # build_system_prompt (async), build_notification_prompt, activate_agent
+  memory.py         # read_soul (file) / read_memory, initialize_run_memory, consolidate_day — Postgres
   tools.py          # send_message, send_dm, react_to_message, file_motion, + 8 others
   models.py         # Pydantic: Persona, OwnerBrief, Agent, Message, Chat, Motion, RunState
   openrouter.py     # Thin async LLM client with 429 retry + fallback cascade
-  storage.py        # JSON run persistence
+  storage.py        # Postgres run persistence (async save_run / load_run / list_runs)
+  db.py             # asyncpg pool + migration runner (db/migrations/*.sql)
   analyze.py        # CLI transcript analyzer (canaries, aggression lexicon, tone)
-  config.py         # DEFAULT_AGENT_MODEL, temperatures, token caps, scheduler constants
+  config.py         # DEFAULT_AGENT_MODEL, temperatures, token caps, scheduler constants, auth env vars
   dials.py          # Trust matrix updates (currently: motion-close only)
   events.py         # Per-run SSE event bus
 
+db/migrations/
+  001_init.sql      # runs + agent_memory tables, applied idempotently at startup
+
 frontend/
   src/App.jsx       # React UI: resident panel, chat column, admin console, observer
-  src/api.js        # API client
-  src/App.css       # WhatsApp-style styling
+  src/Login.jsx     # Password entry screen (gated by /api/health auth check)
+  src/api.js        # API client (relative URLs; VITE_API_BASE override for dev)
+  src/App.css       # WhatsApp-style styling + login card
 ```
 
 ### Data (per-building, per-run)
 
-```
-data/
-  buildings/
-    001/                      # "Condominio Via Garibaldi" — the only building today
-      building.json           # id, name, fictional_start_iso
-      residents.json          # 5 cast templates (persona + owner_kind + wallet)
-      souls/{agent_id}.md     # immutable first-person SOUL per resident
-      memory_seeds/{agent_id}.md  # day-1 MEMORY seed (bio facts, empty "Appunti")
+**Static authoring data** (bundled with the deploy slug, read-only):
 
-  runs/
-    {run_id}.json             # full RunState snapshot
-    {run_id}/
-      memory/{agent_id}.md    # copied from seed on day 1, appended at each day_end
 ```
+data/buildings/
+  001/                        # "Condominio Via Garibaldi" — the only building today
+    building.json             # id, name, fictional_start_iso
+    residents.json            # 5 cast templates (persona + owner_kind + wallet)
+    souls/{agent_id}.md       # immutable first-person SOUL per resident
+    memory_seeds/{agent_id}.md  # day-1 MEMORY seed (bio facts, empty "Appunti")
+```
+
+**Mutable per-run state** (Supabase Postgres):
+
+- `runs` — `run_id text pk, state jsonb, created_at, updated_at`. Entire
+  `RunState` is round-tripped as JSONB on every `save_run`.
+- `agent_memory` — `(run_id, agent_id)` pk, `content text`. Seeded from
+  `memory_seeds/` on day 1, appended atomically at each day_end
+  (`rtrim(content, E' \t\n\r') || $new`).
 
 Adding a second building = `mkdir data/buildings/002` with the same four files. Zero code changes.
 
@@ -130,9 +139,13 @@ The end-of-day diary is written BY THE AGENT with an LLM call, not extracted by 
 
 When the dedup filter catches a near-identical resend, `ctx.done = True` ends the activation — preventing the "tack on a different tail to slip past the filter" workaround. Consecutive-DM and daily-cap blocks just refuse the send; the agent can still do other things.
 
-### 4.7 Auto-advance: await the POST, don't react to `day_end` SSE
+### 4.7 Auto-advance chains on `day_done` SSE, not on the POST response
 
-Days chain automatically in the frontend. The subtle constraint is that `day_end` SSE is published from *inside* the `advance_day` per-run lock — specifically **before** per-agent memory consolidation runs. A POST fired on `day_end` hits a still-held lock and 409s. The frontend therefore schedules the next advance in `onAdvance`'s success path (after the POST response), never from the `day_end` event handler. Same rule applies to any future auto-looping caller.
+Days chain automatically in the frontend. `POST /advance_day` now returns **202** immediately and the day runs as a background `asyncio.create_task` on the server — this is what keeps the request under Heroku's 30s H12 timeout. The POST therefore carries no state the frontend can chain on.
+
+The chain trigger is the new `day_done` SSE event, published from the background helper AFTER `save_run` + memory consolidation + lock release. `day_end` still fires *during* the lock (mid-lifecycle) and must NOT be used for chaining — a POST fired on `day_end` will 409 against the still-held lock.
+
+Frontend rule: `onAdvance` only kicks off the work (`api.advanceDay(id)` → 202); the `day_done` SSE handler is what clears the `working` flag and schedules the next advance. The `paused` flag is read via a ref so the SSE closure sees the current value without re-subscribing.
 
 ---
 

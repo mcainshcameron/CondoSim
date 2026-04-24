@@ -1,0 +1,12 @@
+{
+  "name": "condosim-root",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Heroku Node buildpack glue: builds the Vite frontend so FastAPI can serve frontend/dist as static.",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "build": "npm --prefix frontend ci && npm --prefix frontend run build"
+  }
+}

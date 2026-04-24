@@ -21,11 +21,9 @@ AGENT_FALLBACK_MODELS = [
 NARRATOR_MODEL = "anthropic/claude-haiku-4.5"
 CLASSIFIER_MODEL = "anthropic/claude-haiku-4.5"
 
-# Paths
+# Paths (read-only — building authoring data, bundled in the deploy slug)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-RUNS_DIR = DATA_DIR / "runs"
-RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Scheduler
 DAY_START_HOUR = 8
@@ -40,10 +38,16 @@ AGENT_MAX_TOKENS = 180
 # Logging
 VERBOSE_LOGGING = True  # prints per-activation traces to stderr
 
-# Server
+# Server. PORT comes from Heroku at runtime; HOST/BACKEND_PORT are local-dev defaults.
 HOST = "127.0.0.1"
-BACKEND_PORT = 8001
-FRONTEND_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+BACKEND_PORT = int(os.getenv("PORT", "8001"))
+
+# Auth + kill switch (production-only behavior; in local dev these may be unset)
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+SESSION_COOKIE_NAME = "condosim_session"
+SESSION_MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 days
+# Cookie sent only over HTTPS by default. In local http dev, set
+# SESSION_COOKIE_SECURE=0 in .env so the browser will accept the cookie.
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "1") not in ("0", "false", "False", "")
+DISABLED = os.getenv("DISABLED", "").strip() == "1"

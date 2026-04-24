@@ -1462,3 +1462,88 @@ button {
 /* Clickable chat header (opens profile on DMs) */
 .chat-header.clickable { cursor: pointer; transition: background 0.12s; }
 .chat-header.clickable:hover { background: #f0f2f5; }
+
+/* --- Auth gate: loading + login --- */
+.auth-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: var(--muted);
+  font-size: 14px;
+}
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, var(--brand-dark), var(--brand));
+  padding: 24px;
+}
+.login-card {
+  background: var(--panel);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  padding: 32px 28px;
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.login-logo {
+  font-size: 36px;
+  text-align: center;
+}
+.login-card h1 {
+  margin: 0;
+  font-size: 18px;
+  text-align: center;
+}
+.login-sub {
+  margin: 0 0 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+.login-card input[type="password"] {
+  font: inherit;
+  font-size: 15px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+.login-card input[type="password"]:focus { border-color: var(--brand); }
+.login-card button {
+  background: var(--brand);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.login-card button:disabled {
+  background: #b0b8b6;
+  cursor: not-allowed;
+}
+.login-error {
+  color: var(--danger);
+  font-size: 12px;
+  text-align: center;
+}
+.login-warn {
+  background: var(--admin);
+  border: 1px solid #e6c97a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #5a4400;
+}
+.login-warn code {
+  background: rgba(0,0,0,0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}

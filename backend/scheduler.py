@@ -383,15 +383,18 @@ class DayLoop:
         self.state.clock.minutes_since_start = day_end_minutes(day)
         # Persist BEFORE publishing day_end so any client that refetches on
         # the event reads the up-to-date run (not the previous day's snapshot).
-        save_run(self.state)
+        await save_run(self.state)
         bus().publish(self.state.run_id, "day_end", {
             "day": day,
             "activations": activated_count,
             "total_messages": len(self.state.messages),
         })
-        # Each agent writes their end-of-day diary entry into MEMORY.md.
+        # Each agent writes their end-of-day diary entry into MEMORY.
         # This is what makes day N+1 feel different from day N.
         await memory.consolidate_day(self.state, day)
+        # Re-save AFTER consolidation: agent.notes are cleared inside
+        # _consolidate_one and that mutation needs to land in Postgres.
+        await save_run(self.state)
 
 
 _ACTIVE_LOOPS: dict[str, DayLoop] = {}

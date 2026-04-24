@@ -38,7 +38,38 @@ python -m backend.analyze data/runs/<run_id>.json --out report.md
 There is **no pytest suite** (noted as a known gap in IMPLEMENTATION.md §6.10).
 `run_smoketest.py` is the regression check — it's slow and costs API credits.
 
-Required env: `OPENROUTER_API_KEY` in `.env` (see `.env.example`).
+Required env (see `.env.example` for the full list):
+
+- `OPENROUTER_API_KEY` — always.
+- `DATABASE_URL` — **now required for local dev too** (Supabase pooler
+  connection string). The smoketest and backend both open an asyncpg pool
+  on startup; without `DATABASE_URL` they raise.
+- `ADMIN_PASSWORD`, `SESSION_SECRET` — required for login to work. In
+  local dev you can set `SESSION_COOKIE_SECURE=0` so cookies work over
+  plain http.
+- `DISABLED=1` — optional kill switch. All `/api/*` except `/api/health`
+  return 503.
+
+## Deploying to Heroku + Supabase
+
+Architecture is a single Heroku Eco dyno (flat €5/mo, no autoscale) running
+FastAPI which both exposes `/api/*` and serves the built Vite SPA at `/`.
+State lives in Supabase Postgres (free tier).
+
+- `Procfile` points at `uvicorn backend.main:app`.
+- `runtime.txt` pins Python 3.12.
+- Root `package.json` is glue for the Node buildpack — `npm run build`
+  installs + builds `frontend/` into `frontend/dist/`, which FastAPI then
+  mounts as static (`backend/main.py` static mount, last route).
+- Set buildpacks in order: `heroku/nodejs` then `heroku/python`.
+- Config vars on Heroku: `DATABASE_URL`, `OPENROUTER_API_KEY`,
+  `ADMIN_PASSWORD`, `SESSION_SECRET`. Leave `DISABLED` unset normally.
+- `db/migrations/001_init.sql` defines the two tables
+  (`runs`, `agent_memory`); it auto-applies on startup but you can also
+  paste it into the Supabase SQL Editor for the initial create.
+- **Never enable autoscaling.** Heroku Eco/Basic can't — keep it that way.
+  Set a hard key-level credit cap on OpenRouter and disable auto-topup;
+  those are the real cost exposures.
 
 ## High-level architecture
 
@@ -60,10 +91,11 @@ activation and injected into the system prompt as the agent's own notebook:
   first person, no incidents or named relationship priors. *Trait vs. incident*
   is a hard rule: a character can BE vindictive; they must not have BEEN
   wronged by a specific neighbor before the run.
-- **MEMORY** (`data/runs/{run_id}/memory/{agent_id}.md`) — mutable diary. Copied
-  from the building's `memory_seeds/` on day 1, then appended each `day_end`
-  by a *second* per-agent LLM call that writes `Cosa è successo` + `Cose da
-  ricordare` under `--- Giorno N, weekday ---`. Biased/lossy by design.
+- **MEMORY** — mutable diary, stored in Postgres (`agent_memory` table,
+  one row per `(run_id, agent_id)`). Seeded from the building's
+  `memory_seeds/*.md` on day 1, then appended each `day_end` by a *second*
+  per-agent LLM call that writes `Cosa è successo` + `Cose da ricordare`
+  under `--- Giorno N, weekday ---`. Biased/lossy by design.
 
 Rule deletions over rule accumulation: the old ~20-rule behavioral preamble
 was stripped. Tone belongs in SOUL; relationship priors belong in MEMORY.
@@ -122,28 +154,47 @@ MEMORY, not injected narration).
 
 ### Persistence & SSE
 
-- `data/runs/{run_id}.json` is the full `RunState` snapshot (`storage.py`).
-- `data/runs/{run_id}/memory/{agent_id}.md` is the per-agent growing diary.
+- **Runs** (`RunState` snapshot) live in Postgres table `runs`
+  (`run_id text pk, state jsonb, created_at, updated_at`). `backend/storage.py`
+  is async — every `save_run`/`load_run`/`list_runs` must be awaited.
+- **Per-agent memory** lives in Postgres table `agent_memory`
+  (`run_id, agent_id, content text, updated_at`). Appended at each `day_end`
+  via an SQL `rtrim || $new` concat so the write is atomic. `backend/memory.py`
+  is async too.
+- **Building authoring data** (`data/buildings/001/*.json`, `souls/*.md`,
+  `memory_seeds/*.md`) stays on disk, read-only, bundled into the deploy slug.
+- **Connection pool** comes from `backend/db.py`. The FastAPI `lifespan`
+  opens/closes it; `statement_cache_size=0` so the pool works with the
+  Supabase transaction pooler.
+- Schema lives in `db/migrations/*.sql` and is applied idempotently at
+  startup (also paste-able into the Supabase SQL Editor).
 - `GET /api/runs/{id}/events` is the SSE bus (`events.py`) —
-  `typing`, `messages`, `day_start`, `day_end`, `motion_filed`, `vote_cast`,
-  `motion_closed`, `trust_updated`, `memory_consolidation_start/done`.
-- **Day-end race fix** is invariant: save run BEFORE publishing `day_end` so
-  SSE observers see a consistent disk state.
-- **Day-end lock invariant**: `day_end` SSE fires *before* per-agent memory
-  consolidation runs — both happen inside the same `advance_day` lock. Any
-  caller that wants to chain to the next day must await the `advance_day`
-  POST response (lock released, consolidation done), not react to the SSE —
-  a POST fired on `day_end` will 409 against the still-held lock. The
-  frontend auto-advance schedules the next day inside `onAdvance`'s success
-  path for this reason.
+  `typing`, `messages`, `day_start`, `day_end`, `day_done`, `motion_filed`,
+  `vote_cast`, `motion_closed`, `trust_updated`,
+  `memory_consolidation_start/done`.
+- **Day-end race fix** is invariant: save run BEFORE publishing `day_end`
+  so SSE observers see a consistent DB state.
+- **Day advance runs as a background task.** `POST /api/runs/{id}/advance_day`
+  spawns an `asyncio.create_task` and returns **202** immediately so the
+  request stays under Heroku's 30s H12 timeout. Sequence inside the task:
+  `advance_to_next_day` → `save_run` → memory consolidation → `save_run`
+  again (to persist cleared `agent.notes`) → publish `day_done` → release
+  the per-run lock.
+- **Day-end lock invariant** (updated): `day_end` SSE fires *during* the
+  day lock (mid-lifecycle, before memory consolidation). The chain trigger
+  is the **`day_done`** event, which fires AFTER consolidation + lock
+  release. A POST during an active day still 409s against the held lock.
+  Frontend auto-advance chains on `day_done`, NOT on `day_end` or the
+  POST response (the POST returns 202 immediately and carries no state).
 
 ### Frontend admin console (`frontend/src/App.jsx`)
 
 - Days advance automatically — no manual "advance day" button. On run load,
-  a short grace delay schedules the first advance; after each day's POST
-  returns, the next advance is scheduled ~3s later. A ⏸ Pausa / ▶ Riprendi
-  toggle in the topbar cancels/resumes the chain. A live mm:ss timer in the
-  topbar sub shows elapsed real time on the current day.
+  a short grace delay schedules the first advance; after each day the
+  `day_done` SSE handler clears `working` and schedules the next advance
+  ~3s later. A ⏸ Pausa / ▶ Riprendi toggle in the topbar cancels/resumes
+  the chain (read via `pausedRef` inside the SSE closure). A live mm:ss
+  timer in the topbar sub shows elapsed real time on the current day.
 - Left chat list is scoped to admin-participating chats (main group + admin
   DMs) regardless of Osservatore toggle. Inter-resident DMs surface in the
   "DM frequenti" section at the bottom of the left panel and open in the

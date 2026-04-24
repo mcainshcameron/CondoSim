@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from './api.js';
+import { api, apiBase } from './api.js';
+import Login from './Login.jsx';
 
-const BACKEND = 'http://127.0.0.1:8001';
+// Empty in production (single-origin deploy on Heroku); set to a non-empty
+// VITE_API_BASE for `vite dev` against a remote backend. Same convention as
+// api.js — see api.js for the env var.
+const BACKEND = apiBase;
 
 function formatItalianDateTime(fictionalStartIso, minutesSinceStart) {
   const base = new Date(fictionalStartIso);
@@ -1216,6 +1220,9 @@ function HelpModal({ onClose }) {
 }
 
 export default function App() {
+  // Auth gate: { checked: have we asked the server yet?, ok: cookie valid?,
+  // configured: is ADMIN_PASSWORD/SESSION_SECRET set on the server? }
+  const [auth, setAuth] = useState({ checked: false, ok: false, configured: true });
   const [state, setState] = useState(null);
   const [selectedChatId, setSelectedChatId] = useState(null);
   const [working, setWorking] = useState(false);
@@ -1239,6 +1246,30 @@ export default function App() {
   const [nextAdvanceAt, setNextAdvanceAt] = useState(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [paused, setPaused] = useState(false);
+
+  // pausedRef lets SSE handlers (registered in a useEffect closure) read the
+  // current paused state without re-subscribing every time it changes.
+  const pausedRef = useRef(paused);
+  useEffect(() => { pausedRef.current = paused; }, [paused]);
+
+  // On mount, ask the server whether we already have a valid session cookie
+  // (and whether auth is configured at all). Drives the Login gate below.
+  useEffect(() => {
+    let cancelled = false;
+    api.health()
+      .then(h => {
+        if (cancelled) return;
+        setAuth({
+          checked: true,
+          ok: !!h.authenticated,
+          configured: !!h.auth_configured,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setAuth({ checked: true, ok: false, configured: true });
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   // Auto-open the tutorial once per browser, after a run is loaded.
   useEffect(() => {
@@ -1388,13 +1419,21 @@ export default function App() {
       const d = JSON.parse(e.data).data;
       setDayStatus(`Giorno ${d.day} concluso: ${d.activations} attivazioni, ${d.total_messages} messaggi totali.`);
       setDayStartedAt(null);
-      // NB: don't schedule the next advance here — day_end fires BEFORE memory
-      // consolidation runs, and the per-run lock is still held until the POST
-      // response returns. Scheduling next-advance lives in onAdvance's success
-      // path, which only runs after the lock is released.
-      // Refresh metadata (clock, trust, motions) but preserve the messages
-      // we accumulated via the SSE stream — fetched state may lag by a few
-      // hundred ms while memory consolidation finishes server-side.
+      setTypingAgents({});
+      // NB: do NOT chain the next day or clear `working` here. day_end fires
+      // mid-lifecycle while the per-run lock is still held (memory
+      // consolidation is still running). Chaining lives in the day_done
+      // handler below, which fires AFTER the lock is released.
+    });
+
+    es.addEventListener('day_done', (e) => {
+      const d = JSON.parse(e.data).data;
+      setWorking(false);
+      setDayStartedAt(null);
+      // Refresh authoritative state (clock, trust, motions, agent.notes
+      // cleared by memory consolidation). Preserve any messages we already
+      // streamed in via SSE so we don't drop ones the server hasn't yet
+      // round-tripped.
       api.getRun(state.run_id).then(fresh => {
         setState(prev => {
           if (!prev) return fresh;
@@ -1402,8 +1441,15 @@ export default function App() {
           const extras = prev.messages.filter(m => !seen.has(m.id));
           return { ...fresh, messages: [...fresh.messages, ...extras] };
         });
+        if (!d.ok) {
+          setDayStatus('Errore: il giorno non è terminato correttamente.');
+          return;
+        }
+        const nextDay = (fresh.clock?.day ?? 0) + 1;
+        if (!pausedRef.current && !fresh.ended && nextDay <= 14) {
+          setNextAdvanceAt(Date.now() + 3000);
+        }
       }).catch(() => {});
-      setTypingAgents({});
     });
 
     es.addEventListener('motion_filed', (e) => {
@@ -1476,20 +1522,15 @@ export default function App() {
     setWorking(true);
     setDayStatus(`Avvio giorno ${state.clock.day}…`);
     try {
-      const result = await api.advanceDay(state.run_id);
-      // POST returned => backend lock released, memory consolidation done.
-      // Chain to the next day unless the run ended or we've hit day 14.
-      const finished = result?.state;
-      const nextDay = (finished?.clock?.day ?? state.clock.day) + 1;
-      if (!paused && finished && !finished.ended && nextDay <= 14) {
-        setNextAdvanceAt(Date.now() + 3000);
-      }
+      // POST returns 202 immediately; the day runs as a background task on
+      // the server. The day_done SSE handler clears `working`, refreshes
+      // state, and chains the next advance.
+      await api.advanceDay(state.run_id);
     } catch (e) {
       setDayStatus('Errore: ' + String(e));
-    } finally {
       setWorking(false);
     }
-  }, [state, working, paused]);
+  }, [state, working]);
 
   useEffect(() => { onAdvanceRef.current = onAdvance; }, [onAdvance]);
 
@@ -1538,6 +1579,16 @@ export default function App() {
     return () => { cancelled = true; };
   }, [state?.run_id, state?.clock?.day, (state?.motions || []).length]);
 
+  // Auth gate: wait for the health check, then show login if needed.
+  if (!auth.checked) return <div className="auth-loading">Caricamento…</div>;
+  if (!auth.ok) {
+    return (
+      <Login
+        configured={auth.configured}
+        onAuthed={() => setAuth(a => ({ ...a, ok: true }))}
+      />
+    );
+  }
   if (!state) return <Setup onCreated={setState} />;
 
   const displayDate = formatItalianDateTime(state.fictional_start_iso, state.clock.minutes_since_start);

@@ -1,9 +1,9 @@
-"""Per-agent SOUL.md + MEMORY.md support.
+"""Per-agent SOUL.md + MEMORY support.
 
 SOUL is building-owned and immutable: data/buildings/{id}/souls/{agent_id}.md.
-MEMORY is run-owned and mutable: data/runs/{run_id}/memory/{agent_id}.md,
-seeded at run start from the building's memory_seeds/ and appended to at
-each day_end by the agent's own LLM call.
+MEMORY is run-owned and mutable: stored in Postgres (table `agent_memory`),
+seeded at run start from the building's memory_seeds/ files and appended to
+at each day_end by the agent's own LLM call.
 
 The agent reads both at activation; the first-person framing in
 build_system_prompt presents them as "your own notes on yourself" rather
@@ -12,12 +12,12 @@ than external instructions.
 from __future__ import annotations
 
 import asyncio
-import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import building
-from .config import AGENT_MAX_TOKENS, MEMORY_TEMPERATURE, RUNS_DIR
+from .config import AGENT_MAX_TOKENS, MEMORY_TEMPERATURE
+from .db import pool
 from .events import bus
 from .logging_utils import log, log_error
 from .models import Agent, RunState
@@ -25,7 +25,7 @@ from .openrouter import OpenRouterError, chat_completion
 
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths (SOUL + seed files only — these stay on disk, bundled with the deploy)
 # ---------------------------------------------------------------------------
 
 def _souls_dir(state: RunState) -> Path:
@@ -36,16 +36,8 @@ def _memory_seeds_dir(state: RunState) -> Path:
     return building.memory_seeds_dir(state.building_id)
 
 
-def _run_memory_dir(run_id: str) -> Path:
-    return RUNS_DIR / run_id / "memory"
-
-
 def soul_path(state: RunState, agent_id: str) -> Path:
     return _souls_dir(state) / f"{agent_id}.md"
-
-
-def memory_path(run_id: str, agent_id: str) -> Path:
-    return _run_memory_dir(run_id) / f"{agent_id}.md"
 
 
 # ---------------------------------------------------------------------------
@@ -60,32 +52,48 @@ def read_soul(state: RunState, agent_id: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def read_memory(state: RunState, agent_id: str) -> str:
-    path = memory_path(state.run_id, agent_id)
-    if not path.exists():
-        log_error("memory", f"missing MEMORY for {agent_id} at {path}")
+async def read_memory(state: RunState, agent_id: str) -> str:
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "select content from agent_memory where run_id = $1 and agent_id = $2",
+            state.run_id,
+            agent_id,
+        )
+    if row is None:
+        log_error("memory", f"missing MEMORY for {agent_id} in run {state.run_id}")
         return ""
-    return path.read_text(encoding="utf-8").strip()
+    return (row["content"] or "").strip()
 
 
 # ---------------------------------------------------------------------------
-# Initialization (called once at run creation)
+# Initialization (called once at run creation, after save_run)
 # ---------------------------------------------------------------------------
 
-def initialize_run_memory(state: RunState) -> None:
-    """Copy each agent's memory_seed into the run's memory directory."""
-    seeds = _memory_seeds_dir(state)
-    run_dir = _run_memory_dir(state.run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
+async def initialize_run_memory(state: RunState) -> None:
+    """Seed each agent's MEMORY row from their building memory_seed file."""
+    seeds_dir = _memory_seeds_dir(state)
+    rows: list[tuple[str, str, str]] = []
     for agent in state.agents:
-        seed = seeds / f"{agent.persona.id}.md"
-        dest = run_dir / f"{agent.persona.id}.md"
+        seed = seeds_dir / f"{agent.persona.id}.md"
         if not seed.exists():
             log_error("memory", f"missing seed for {agent.persona.id} at {seed}")
-            dest.write_text("", encoding="utf-8")
-            continue
-        shutil.copyfile(seed, dest)
-    log("memory", f"initialized memory for run {state.run_id}: {len(state.agents)} agents")
+            content = ""
+        else:
+            content = seed.read_text(encoding="utf-8")
+        rows.append((state.run_id, agent.persona.id, content))
+
+    async with pool().acquire() as conn:
+        await conn.executemany(
+            """
+            insert into agent_memory (run_id, agent_id, content)
+            values ($1, $2, $3)
+            on conflict (run_id, agent_id) do update
+              set content = excluded.content,
+                  updated_at = now()
+            """,
+            rows,
+        )
+    log("memory", f"initialized memory for run {state.run_id}: {len(rows)} agents")
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +188,7 @@ async def _consolidate_one(
 ) -> None:
     aid = agent.persona.id
     soul = read_soul(state, aid)
-    memory_so_far = read_memory(state, aid)
+    memory_so_far = await read_memory(state, aid)
     transcript = _today_transcript(state, agent, day)
     prompt = _consolidation_prompt(state, agent, day, soul, memory_so_far, transcript)
 
@@ -205,10 +213,23 @@ async def _consolidate_one(
         return
 
     weekday = _weekday_italian(state, day)
-    header = f"\n\n--- Giorno {day}, {weekday} ---\n"
-    path = memory_path(state.run_id, aid)
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    path.write_text(existing.rstrip() + header + body.strip() + "\n", encoding="utf-8")
+    addition = f"\n\n--- Giorno {day}, {weekday} ---\n{body.strip()}\n"
+
+    # Atomic append in SQL: trim trailing whitespace, concat the day entry.
+    # rtrim with the whitespace set strips any combination of spaces / tabs /
+    # newlines that may have accumulated, mirroring Python's str.rstrip().
+    async with pool().acquire() as conn:
+        await conn.execute(
+            """
+            update agent_memory
+               set content = rtrim(content, E' \\t\\n\\r') || $3,
+                   updated_at = now()
+             where run_id = $1 and agent_id = $2
+            """,
+            state.run_id,
+            aid,
+            addition,
+        )
     log("memory", f"{aid} day{day} consolidated ({len(body)}ch)")
 
     # Clear the intra-day scratchpad — today's thoughts have been absorbed.

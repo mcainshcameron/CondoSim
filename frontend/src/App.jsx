@@ -275,19 +275,10 @@ function Setup({ onCreated }) {
   );
 }
 
-function findChatForResident(state, residentId, godView) {
+function findChatForResident(state, residentId) {
   const adminDm = state.chats.find(c => c.kind === 'dm'
     && c.member_ids.includes('admin') && c.member_ids.includes(residentId));
-  if (adminDm) return adminDm.id;
-  if (godView) {
-    const dms = state.chats.filter(c => c.kind === 'dm' && c.member_ids.includes(residentId));
-    if (dms.length) {
-      const counts = dms.map(c => ({ c, n: state.messages.filter(m => m.chat_id === c.id).length }));
-      counts.sort((a, b) => b.n - a.n);
-      return counts[0].c.id;
-    }
-  }
-  return null;
+  return adminDm?.id || null;
 }
 
 function findChatForPair(state, aId, bId) {
@@ -736,7 +727,7 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
       <div className="panel-title">Residenti</div>
       {state.agents.map(a => {
         const msgsToday = state.messages.filter(m => m.sender_id === a.persona.id && m.day === state.clock.day).length;
-        const chatId = findChatForResident(state, a.persona.id, godView);
+        const chatId = findChatForResident(state, a.persona.id);
         return (
           <div
             className="resident-card clickable"

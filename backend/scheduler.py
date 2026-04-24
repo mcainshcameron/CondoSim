@@ -378,6 +378,16 @@ class DayLoop:
             # Advance the clock to the latest fictional time reached
             self.state.clock.minutes_since_start = max(max_time_reached, clock_floor)
 
+            # Persist after every batch so mid-day state is durable in Postgres.
+            # Without this, agent messages live only in RAM until day_end —
+            # a dyno restart, lost SSE packet, or UI refresh mid-day would make
+            # them invisible to the client (even though they'd eventually land
+            # at day_end). Cost: one UPSERT per ~5 agent activations.
+            try:
+                await save_run(self.state)
+            except Exception as exc:
+                log_error("sched", f"mid-batch save_run failed (will retry at day_end): {exc!r}")
+
         log("sched", f"=== DAY {day} END === activations={activated_count} total_msgs={len(self.state.messages)}")
         # End of day: clock to day_end
         self.state.clock.minutes_since_start = day_end_minutes(day)

@@ -1366,7 +1366,26 @@ export default function App() {
   // Subscribe to SSE on run load
   useEffect(() => {
     if (!state?.run_id) return;
-    const es = new EventSource(`${BACKEND}/api/runs/${state.run_id}/events`);
+    const runId = state.run_id;
+    const es = new EventSource(`${BACKEND}/api/runs/${runId}/events`);
+
+    // Every time the stream (re)opens — initial connect AND after a browser
+    // auto-reconnect following a network drop — refetch the run so we catch
+    // any messages that were published while we were disconnected. Without
+    // this, a 30s+ blip (slow LLM call, Heroku router hiccup) can leave the
+    // UI permanently behind DB state until the page is manually refreshed.
+    es.addEventListener('open', () => {
+      api.getRun(runId).then(fresh => {
+        setState(prev => {
+          if (!prev) return fresh;
+          const byId = new Map(fresh.messages.map(m => [m.id, m]));
+          for (const m of prev.messages) if (!byId.has(m.id)) byId.set(m.id, m);
+          return { ...fresh, messages: Array.from(byId.values()).sort(
+            (a, b) => a.fictional_timestamp_minutes - b.fictional_timestamp_minutes
+          ) };
+        });
+      }).catch(() => {});
+    });
 
     es.addEventListener('message_sent', (e) => {
       const payload = JSON.parse(e.data).data;

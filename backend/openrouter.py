@@ -101,13 +101,15 @@ async def chat_completion(
     models_to_try = [model, *fallback_models]
     last_error = ""
     last_status = 0
+    overall_start = time.time()
 
     for i, m in enumerate(models_to_try):
         call_caller = caller if i == 0 else f"{caller}(fallback:{m})"
         for attempt, backoff in enumerate([0.0, *_RETRY_BACKOFF_SEC]):
             if backoff > 0:
-                log("openrouter", f"{call_caller} retry in {backoff}s (attempt {attempt + 1})")
+                log("openrouter", f"{call_caller} retry in {backoff}s (attempt {attempt + 1}/{len(_RETRY_BACKOFF_SEC) + 1})")
                 await asyncio.sleep(backoff)
+            attempt_tag = f"{call_caller}#att{attempt + 1}"
             status, data, err = await _single_call(
                 model=m,
                 messages=messages,
@@ -115,21 +117,28 @@ async def chat_completion(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                caller=call_caller,
+                caller=attempt_tag,
             )
             if status == 200 and data:
                 choices = data.get("choices") or []
                 if not choices:
                     raise OpenRouterError(f"No choices in response: {json.dumps(data)[:400]}")
+                total = time.time() - overall_start
+                # Only bother with the "took total X" line if there were any
+                # retries/fallbacks — otherwise single-call log is sufficient.
+                if attempt > 0 or i > 0:
+                    log("openrouter", f"{caller} succeeded after model#{i + 1} attempt#{attempt + 1} total={total:.1f}s")
                 return choices[0]["message"]
             last_status = status
             last_error = err
             # Only retry on transient statuses; fall through otherwise
             if status not in _RETRY_STATUSES:
+                log("openrouter", f"{attempt_tag} non-retryable status {status}, falling through")
                 break
         # All retries for this model exhausted; try the next model in the cascade
-        log_error("openrouter", f"{call_caller} exhausted retries (last status {last_status})")
+        log_error("openrouter", f"{call_caller} exhausted {len(_RETRY_BACKOFF_SEC) + 1} attempts (last status {last_status})")
 
+    total = time.time() - overall_start
     raise OpenRouterError(
-        f"All models failed (last status {last_status}): {last_error}"
+        f"All models failed after {total:.1f}s (last status {last_status}): {last_error}"
     )

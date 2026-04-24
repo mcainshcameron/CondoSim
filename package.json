@@ -7,6 +7,6 @@
     "node": "20.x"
   },
   "scripts": {
-    "build": "npm --prefix frontend ci && npm --prefix frontend run build"
+    "build": "npm --prefix frontend ci --include=dev && npm --prefix frontend run build"
   }
 }

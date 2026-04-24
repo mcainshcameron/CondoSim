@@ -94,6 +94,12 @@ class Message(BaseModel):
     forwarded_original_content: str | None = None
     # Emoji reactions: map emoji -> list of agent_ids who reacted
     reactions: dict[str, list[str]] = Field(default_factory=dict)
+    # Whether this message has been considered by the scheduler's cascade.
+    # Default True: existing DB rows (no field) deserialize as already-cascaded
+    # so a deploy doesn't replay every historical admin message. New messages
+    # set this to False explicitly at construction; schedule_reactions flips
+    # it to True after processing.
+    cascaded: bool = True
 
 
 class Chat(BaseModel):

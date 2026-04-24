@@ -91,9 +91,19 @@ def build_notification_prompt(ctx: ToolContext, agent: Agent, inbox_text: str, n
     now_str = _format_time_it(ctx.current_fictional_minutes, state.fictional_start_iso)
     parts = [
         f"{now_str}. Dai un'occhiata al telefono.",
-        "",
-        inbox_text,
     ]
+
+    # Front-load any unanswered admin DMs so the agent sees them before
+    # scrolling through the rest of the inbox. This is the strongest
+    # attention boost we can apply without altering activation scheduling.
+    awaiting = _admin_dms_awaiting_reply(state, agent, ctx.current_fictional_minutes)
+    if awaiting:
+        parts.extend([
+            "",
+            "L'amministratore ti ha scritto in privato e attende una risposta da te. Aprila ora prima di guardare il resto.",
+        ])
+
+    parts.extend(["", inbox_text])
 
     # An admin-set goal is the most steerable lever during play. Surface it
     # here (fresh every activation) in addition to the system prompt — same
@@ -209,11 +219,40 @@ def _fmt_when(msg_day: int, current_day: int, fictional_minutes: int) -> str:
     return f"{gap} giorni fa alle {hm}"
 
 
+def _admin_dms_awaiting_reply(state: RunState, agent: Agent, now: int) -> list[tuple]:
+    """Admin DMs where the most recent message is from admin and the agent
+    hasn't replied to it yet. Returns list of (chat, last_admin_msg). Used
+    to make sure the agent surfaces these even before they've ever spoken
+    in the chat — `_thread_status` would otherwise skip them."""
+    aid = agent.persona.id
+    out = []
+    for chat in state.chats:
+        if chat.kind != "dm" or "admin" not in chat.member_ids:
+            continue
+        if aid not in chat.member_ids:
+            continue
+        msgs = [m for m in state.messages
+                if m.chat_id == chat.id and m.fictional_timestamp_minutes <= now]
+        if not msgs:
+            continue
+        msgs.sort(key=lambda m: m.fictional_timestamp_minutes)
+        last = msgs[-1]
+        # If the most recent message in this DM is from admin, the agent
+        # owes a reply.
+        if last.sender_id == "admin":
+            out.append((chat, last))
+    return out
+
+
 def _thread_status(ctx: ToolContext, agent: Agent) -> str:
     """For every chat the agent has ever spoken in (main + DMs + groups),
     show their last outgoing message and the last reply from any partner,
     with day-relative timestamps. This is the memory spine that stops the
-    agent from re-forming an identical impulse day after day."""
+    agent from re-forming an identical impulse day after day.
+
+    Admin DMs are special-cased: they appear at the FRONT of the list even
+    if the agent hasn't yet spoken in them, so a fresh admin DM doesn't
+    sink to the bottom of the agent's attention."""
     state = ctx.state
     aid = agent.persona.id
     current_day = state.clock.day
@@ -235,10 +274,25 @@ def _thread_status(ctx: ToolContext, agent: Agent) -> str:
         t = text.strip().replace("\n", " ")
         return t if len(t) <= n else t[:n] + "…"
 
+    # Admin-DM-awaiting-reply blocks go at the front — these are the highest
+    # priority threads. Suppresses the silently-ignored-by-_thread_status
+    # case where the agent has never spoken in the chat.
+    awaiting_admin = _admin_dms_awaiting_reply(state, agent, now)
+    awaiting_chat_ids = {chat.id for chat, _ in awaiting_admin}
+    front_blocks: list[str] = []
+    for chat, last_admin in awaiting_admin:
+        when = _fmt_when(last_admin.day, current_day, last_admin.fictional_timestamp_minutes)
+        front_blocks.append(
+            f"- DM con l'Amministratore — ti ha scritto {when} e attende risposta:\n"
+            f"    Amministratore: \"{trim(last_admin.content)}\""
+        )
+
     blocks: list[str] = []
     for chat in state.chats:
         if aid not in chat.member_ids:
             continue
+        if chat.id in awaiting_chat_ids:
+            continue  # already covered as a front_block
         msgs = sorted(by_chat.get(chat.id, []), key=lambda m: m.fictional_timestamp_minutes)
         own_idx = [i for i, m in enumerate(msgs) if m.sender_id == aid]
         if not own_idx:
@@ -281,12 +335,13 @@ def _thread_status(ctx: ToolContext, agent: Agent) -> str:
 
         blocks.append("\n".join(lines))
 
-    if not blocks:
+    all_blocks = front_blocks + blocks
+    if not all_blocks:
         return ""
     return (
         "I tuoi fili aperti (quello che hai già detto e chi ha risposto — "
         "non ripeterti, non riconfermare cose già confermate, non riformulare):\n"
-        + "\n".join(blocks)
+        + "\n".join(all_blocks)
     )
 
 

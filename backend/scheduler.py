@@ -88,6 +88,14 @@ def _sample_activation_time(agent, from_minutes: int, day: int) -> int:
 
 
 def _engagement_probability(agent, trigger: Message, state: RunState) -> float:
+    # Admin DMs always engage the recipient at 1.0. The recipient owes a
+    # reply; saturation/mention/budget dampers should not gate it. The
+    # explicit force=True path used by admin endpoints bypasses this whole
+    # function, but cascade paths (an agent's reaction triggering another
+    # roll on a DM chat) still hit it — this keeps behavior consistent.
+    chat = next((c for c in state.chats if c.id == trigger.chat_id), None)
+    if trigger.sender_kind == "admin" and chat is not None and chat.kind == "dm":
+        return 1.0
     base = RESPONSIVENESS_BASE_PROB[agent.persona.responsiveness]
     # @mention boost
     if agent.persona.display_name.split()[0].lower() in trigger.content.lower():
@@ -258,6 +266,9 @@ class DayLoop:
             self._push(QueueItem(at, self.seq, aid, trigger.id, depth))
             scheduled += 1
             log("sched", f"  {aid} SCHEDULED @min{at} depth={depth} force={force}")
+        # Mark the trigger as considered, regardless of how many recipients
+        # were actually scheduled. Prevents re-cascade on future days.
+        trigger.cascaded = True
         log("sched", f"schedule_reactions for msg '{trigger.content[:40]!r}' -> {scheduled} activations")
 
     async def run(self) -> None:
@@ -269,10 +280,12 @@ class DayLoop:
         log("sched", f"=== DAY {day} START ===")
         bus().publish(self.state.run_id, "day_start", {"day": day})
 
-        # Seed from all non-resident messages sent today (admin announcements,
-        # external contacts, etc.) that haven't cascaded yet.
-        seed_msgs = [m for m in self.state.messages if m.day == day and m.sender_kind != "resident"]
-        log("sched", f"seed: {len(seed_msgs)} non-resident messages on day {day}")
+        # Seed from any non-resident message that hasn't been cascaded yet.
+        # This catches admin messages sent between days, during the previous
+        # day's consolidation window, or before the first advance — they
+        # carry the prior day's stamp but still deserve agent reactions.
+        seed_msgs = [m for m in self.state.messages if m.sender_kind != "resident" and not m.cascaded]
+        log("sched", f"seed: {len(seed_msgs)} uncascaded non-resident messages")
         for m in seed_msgs:
             self.schedule_reactions(m, depth=0)
 
@@ -394,6 +407,14 @@ class DayLoop:
         # Persist BEFORE publishing day_end so any client that refetches on
         # the event reads the up-to-date run (not the previous day's snapshot).
         await save_run(self.state)
+        # Pop the active-loop entry NOW, before consolidation. From this
+        # point on the queue is no longer being drained, so admin endpoints
+        # must NOT see this loop as "live" (otherwise they'd push reactions
+        # into a dead queue and the agent would never respond). Any admin
+        # message arriving during consolidation routes through the
+        # `loop is None` branch and gets picked up by the next day's seed
+        # via Message.cascaded=False.
+        _ACTIVE_LOOPS.pop(self.state.run_id, None)
         bus().publish(self.state.run_id, "day_end", {
             "day": day,
             "activations": activated_count,
@@ -415,21 +436,47 @@ def active_loop(run_id: str) -> DayLoop | None:
     return _ACTIVE_LOOPS.get(run_id)
 
 
-async def advance_to_next_day(state: RunState) -> None:
-    """Wake up the next fictional morning and let the day play out."""
+def setup_day(state: RunState) -> "DayLoop | None":
+    """Synchronously bump the clock to the next day's start, build the
+    DayLoop, and register it in _ACTIVE_LOOPS. Returns the loop, or None if
+    the run is already ended.
+
+    Split from `run_day` so callers can hold a lock across DB-load +
+    registration without holding it through the slow queue drain. After
+    setup_day returns, `active_loop(state.run_id)` is `loop`, which means
+    admin endpoints will use the shared state object instead of re-loading
+    from the DB and racing.
+    """
     if state.ended:
-        return
-    # If this is the start of the run, we're already on Day 1 — just run it.
-    # Otherwise advance the day counter first.
+        return None
     if state.clock.minutes_since_start > 0:
         state.clock.day += 1
         state.clock.minutes_since_start = day_start_minutes(state.clock.day)
     else:
         state.clock.minutes_since_start = day_start_minutes(state.clock.day)
-
     loop = DayLoop(state)
     _ACTIVE_LOOPS[state.run_id] = loop
+    return loop
+
+
+async def run_day(loop: "DayLoop") -> None:
+    """Drain the registered loop's queue and run consolidation. Pops the
+    loop out of _ACTIVE_LOOPS regardless of outcome. (Note: DayLoop.run
+    pops itself early, before consolidation; this finally is a safety net.)
+    """
     try:
         await loop.run()
     finally:
-        _ACTIVE_LOOPS.pop(state.run_id, None)
+        _ACTIVE_LOOPS.pop(loop.state.run_id, None)
+
+
+async def advance_to_next_day(state: RunState) -> None:
+    """Wake up the next fictional morning and let the day play out.
+
+    Backward-compat wrapper: callers that need to hold a lock through the
+    setup but not the run should call setup_day + run_day directly.
+    """
+    loop = setup_day(state)
+    if loop is None:
+        return
+    await run_day(loop)

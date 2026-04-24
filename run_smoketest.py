@@ -51,6 +51,7 @@ def inject_admin_message(state, day: int, text: str) -> None:
         wall_clock_iso=datetime.utcnow().isoformat() + "Z",
         day=day,
         audience=[a.persona.id for a in state.agents],
+        cascaded=False,
     )
     state.messages.append(msg)
     # Ensure the clock hasn't outrun the injection so the scheduler will

@@ -37,8 +37,8 @@ from .events_pool import compute_suggestions
 from .logging_utils import log, log_error, tail_logs
 from .models import Message, Motion, RunState
 from .building import build_run_state
-from .scheduler import active_loop, advance_to_next_day, day_end_minutes, day_start_minutes
-from .storage import list_runs, load_run, save_run
+from .scheduler import active_loop, advance_to_next_day, day_end_minutes, day_start_minutes, run_day, setup_day
+from .storage import list_runs, load_run, save_run, state_lock
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +178,23 @@ async def _get_run(run_id: str) -> RunState:
     return state
 
 
+async def _get_run_for_mutation(run_id: str) -> RunState:
+    """Fetch the authoritative state for a mutation. If a day loop is
+    running, return its in-memory state object so writes go to the same
+    instance the scheduler is iterating. Otherwise load from DB.
+
+    MUST be called inside `async with state_lock(run_id):` so that the
+    "is a loop registered?" check and the subsequent mutation/save form
+    one critical section. Without the lock, a `_run_day_bg` racing in
+    parallel could load+register between this check and the save, and
+    its later save would clobber the admin's write.
+    """
+    loop = active_loop(run_id)
+    if loop is not None:
+        return loop.state
+    return await _get_run(run_id)
+
+
 def _resident_ids(state: RunState) -> set[str]:
     return {a.persona.id for a in state.agents}
 
@@ -199,6 +216,7 @@ def _append_admin_message(state: RunState, chat_id: str, text: str, audience: li
         wall_clock_iso=datetime.utcnow().isoformat() + "Z",
         day=state.clock.day,
         audience=audience,
+        cascaded=False,
     )
     state.messages.append(msg)
     return msg
@@ -296,18 +314,31 @@ async def _run_day_bg(run_id: str, lock: asyncio.Lock) -> None:
     """
     success = False
     final_day: int | None = None
+    state = None
+    day_loop = None
     try:
-        state = await load_run(run_id)
-        if state is None:
-            log_error("api", f"_run_day_bg: run {run_id} not found")
-            return
-        if state.ended:
-            log("api", f"_run_day_bg: run {run_id} already ended, skipping")
-            return
-        messages_before = len(state.messages)
-        log("api", f"advance_day(bg) run={run_id} from day={state.clock.day}")
+        # state_lock guards load + setup_day. We MUST register the loop in
+        # _ACTIVE_LOOPS before releasing the lock, so any admin endpoint
+        # waiting on state_lock will then see the loop via active_loop()
+        # and operate on the shared in-memory state instead of re-loading
+        # a stale copy from the DB. Once setup_day returns, the lock can
+        # safely be released — admin mutations land on loop.state and the
+        # scheduler picks them up.
+        async with state_lock(run_id):
+            state = await load_run(run_id)
+            if state is None:
+                log_error("api", f"_run_day_bg: run {run_id} not found")
+                return
+            if state.ended:
+                log("api", f"_run_day_bg: run {run_id} already ended, skipping")
+                return
+            messages_before = len(state.messages)
+            log("api", f"advance_day(bg) run={run_id} from day={state.clock.day}")
+            day_loop = setup_day(state)
+        # state_lock released. Run the day; admin endpoints can now mutate
+        # loop.state safely under their own state_lock acquisitions.
         try:
-            await advance_to_next_day(state)
+            await run_day(day_loop)
         except Exception as exc:
             log_error("api", f"advance_day(bg) failed: {exc!r}")
             bus().publish(run_id, "error", {"message": f"advance_day failed: {exc}"})
@@ -379,21 +410,20 @@ QUICK_ACTIONS = {
 
 @app.post("/api/runs/{run_id}/admin/quick_action")
 async def api_quick_action(run_id: str, payload: QuickActionPayload):
-    state = await _get_run(run_id)
-    loop = active_loop(run_id)
-    if loop is not None:
-        state = loop.state
     action = QUICK_ACTIONS.get(payload.action)
     if action is None:
         raise HTTPException(status_code=400, detail=f"Azione sconosciuta: {payload.action}")
     _label, body_fn = action
-    body = body_fn(state)
-    audience = sorted(_resident_ids(state))
-    msg = _append_admin_message(state, "main", body, audience)
-    bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
-    if loop is not None:
-        loop.schedule_reactions(msg, depth=0, force=True)
-    await save_run(state)
+    async with state_lock(run_id):
+        state = await _get_run_for_mutation(run_id)
+        loop = active_loop(run_id)
+        body = body_fn(state)
+        audience = sorted(_resident_ids(state))
+        msg = _append_admin_message(state, "main", body, audience)
+        bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
+        if loop is not None:
+            loop.schedule_reactions(msg, depth=0, force=True)
+        await save_run(state)
     return {"ok": True, "message": msg.model_dump()}
 
 
@@ -416,35 +446,34 @@ def api_list_quick_actions():
 
 @app.post("/api/runs/{run_id}/motions")
 async def api_file_motion(run_id: str, payload: MotionPayload):
-    state = await _get_run(run_id)
-    loop = active_loop(run_id)
-    if loop is not None:
-        state = loop.state
     if not payload.title.strip() or not payload.description.strip():
         raise HTTPException(status_code=400, detail="Titolo e descrizione obbligatori")
     from uuid import uuid4 as _uuid
-    motion = Motion(
-        id=f"m_{_uuid().hex[:8]}",
-        title=payload.title.strip(),
-        description=payload.description.strip(),
-        proposer_id="admin",
-        proposer_display_name="Amministratore",
-        day_proposed=state.clock.day,
-        proposed_at_fictional_min=state.clock.minutes_since_start,
-    )
-    state.motions.append(motion)
-    audience = sorted(_resident_ids(state))
-    body = (
-        f"📋 Mozione depositata: \"{motion.title}\"\n"
-        f"{motion.description}\n"
-        f"(votate con sì / no / astenuto — codice mozione: {motion.id})"
-    )
-    msg = _append_admin_message(state, "main", body, audience)
-    bus().publish(run_id, "motion_filed", {"motion": motion.model_dump()})
-    bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
-    if loop is not None:
-        loop.schedule_reactions(msg, depth=0, force=True)
-    await save_run(state)
+    async with state_lock(run_id):
+        state = await _get_run_for_mutation(run_id)
+        loop = active_loop(run_id)
+        motion = Motion(
+            id=f"m_{_uuid().hex[:8]}",
+            title=payload.title.strip(),
+            description=payload.description.strip(),
+            proposer_id="admin",
+            proposer_display_name="Amministratore",
+            day_proposed=state.clock.day,
+            proposed_at_fictional_min=state.clock.minutes_since_start,
+        )
+        state.motions.append(motion)
+        audience = sorted(_resident_ids(state))
+        body = (
+            f"📋 Mozione depositata: \"{motion.title}\"\n"
+            f"{motion.description}\n"
+            f"(votate con sì / no / astenuto — codice mozione: {motion.id})"
+        )
+        msg = _append_admin_message(state, "main", body, audience)
+        bus().publish(run_id, "motion_filed", {"motion": motion.model_dump()})
+        bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
+        if loop is not None:
+            loop.schedule_reactions(msg, depth=0, force=True)
+        await save_run(state)
     return {"ok": True, "motion": motion.model_dump()}
 
 
@@ -470,60 +499,56 @@ async def api_get_agent_memory(run_id: str, agent_id: str):
 async def api_set_agent_goal(run_id: str, agent_id: str, payload: AgentGoalPayload):
     """Admin sets an additional goal that the agent internalises as their own
     in the next activation. Framed in-fiction, never as 'admin said X'."""
-    state = await _get_run(run_id)
-    loop = active_loop(run_id)
-    if loop is not None:
-        state = loop.state
-    agent = next((a for a in state.agents if a.persona.id == agent_id), None)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Residente non trovato")
-    agent.admin_goal = (payload.goal or "").strip()
-    bus().publish(run_id, "agent_goal_updated", {
-        "agent_id": agent_id,
-        "has_goal": bool(agent.admin_goal),
-    })
-    await save_run(state)
+    async with state_lock(run_id):
+        state = await _get_run_for_mutation(run_id)
+        agent = next((a for a in state.agents if a.persona.id == agent_id), None)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Residente non trovato")
+        agent.admin_goal = (payload.goal or "").strip()
+        bus().publish(run_id, "agent_goal_updated", {
+            "agent_id": agent_id,
+            "has_goal": bool(agent.admin_goal),
+        })
+        await save_run(state)
     return {"ok": True, "agent_id": agent_id, "goal": agent.admin_goal}
 
 
 @app.post("/api/runs/{run_id}/motions/{motion_id}/close")
 async def api_close_motion(run_id: str, motion_id: str):
-    state = await _get_run(run_id)
-    loop = active_loop(run_id)
-    if loop is not None:
-        state = loop.state
-    motion = next((m for m in state.motions if m.id == motion_id), None)
-    if motion is None:
-        raise HTTPException(status_code=404, detail="Mozione non trovata")
-    if motion.status != "open":
-        return {"ok": False, "motion": motion.model_dump()}
-    # Tally: one vote per resident, plus millesimi weighting per Italian law
-    yes_ids = [aid for aid, v in motion.votes.items() if v == "yes"]
-    no_ids = [aid for aid, v in motion.votes.items() if v == "no"]
-    millesimi_by_id = {a.persona.id: a.persona.millesimi for a in state.agents}
-    yes_mil = sum(millesimi_by_id.get(a, 0) for a in yes_ids)
-    no_mil = sum(millesimi_by_id.get(a, 0) for a in no_ids)
-    headcount_yes = len(yes_ids)
-    headcount_no = len(no_ids)
-    attending = headcount_yes + headcount_no
-    # Seconda convocazione: ≥1/3 attending of 5 = 2. 500/1000 millesimi threshold.
-    quorum_ok = attending >= 2
-    passed = quorum_ok and headcount_yes > headcount_no and yes_mil >= 500
-    motion.status = "passed" if passed else "failed"
-    motion.closed_at_fictional_min = state.clock.minutes_since_start
-    motion.outcome_note = (
-        f"Sì: {headcount_yes} ({yes_mil}/1000 millesimi) · "
-        f"No: {headcount_no} ({no_mil}/1000 millesimi) · "
-        f"{'Approvata' if passed else 'Respinta'}"
-    )
-    apply_trust_from_votes(state, motion)
+    async with state_lock(run_id):
+        state = await _get_run_for_mutation(run_id)
+        motion = next((m for m in state.motions if m.id == motion_id), None)
+        if motion is None:
+            raise HTTPException(status_code=404, detail="Mozione non trovata")
+        if motion.status != "open":
+            return {"ok": False, "motion": motion.model_dump()}
+        # Tally: one vote per resident, plus millesimi weighting per Italian law
+        yes_ids = [aid for aid, v in motion.votes.items() if v == "yes"]
+        no_ids = [aid for aid, v in motion.votes.items() if v == "no"]
+        millesimi_by_id = {a.persona.id: a.persona.millesimi for a in state.agents}
+        yes_mil = sum(millesimi_by_id.get(a, 0) for a in yes_ids)
+        no_mil = sum(millesimi_by_id.get(a, 0) for a in no_ids)
+        headcount_yes = len(yes_ids)
+        headcount_no = len(no_ids)
+        attending = headcount_yes + headcount_no
+        # Seconda convocazione: ≥1/3 attending of 5 = 2. 500/1000 millesimi threshold.
+        quorum_ok = attending >= 2
+        passed = quorum_ok and headcount_yes > headcount_no and yes_mil >= 500
+        motion.status = "passed" if passed else "failed"
+        motion.closed_at_fictional_min = state.clock.minutes_since_start
+        motion.outcome_note = (
+            f"Sì: {headcount_yes} ({yes_mil}/1000 millesimi) · "
+            f"No: {headcount_no} ({no_mil}/1000 millesimi) · "
+            f"{'Approvata' if passed else 'Respinta'}"
+        )
+        apply_trust_from_votes(state, motion)
 
-    audience = sorted(_resident_ids(state))
-    body = f"🗳️ Chiusa votazione: \"{motion.title}\" — {motion.outcome_note}"
-    msg = _append_admin_message(state, "main", body, audience)
-    bus().publish(run_id, "motion_closed", {"motion": motion.model_dump()})
-    bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
-    await save_run(state)
+        audience = sorted(_resident_ids(state))
+        body = f"🗳️ Chiusa votazione: \"{motion.title}\" — {motion.outcome_note}"
+        msg = _append_admin_message(state, "main", body, audience)
+        bus().publish(run_id, "motion_closed", {"motion": motion.model_dump()})
+        bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
+        await save_run(state)
     return {"ok": True, "motion": motion.model_dump()}
 
 
@@ -566,60 +591,56 @@ def api_debug_logs(n: int = 300):
 
 @app.post("/api/runs/{run_id}/admin/announce")
 async def api_admin_announce(run_id: str, payload: AnnouncePayload):
-    state = await _get_run(run_id)
     if not payload.text.strip():
         raise HTTPException(status_code=400, detail="Messaggio vuoto")
-    # If a day loop is currently running, operate on ITS state instance so
-    # the new message is in the shared object the scheduler is iterating on.
-    loop = active_loop(run_id)
-    if loop is not None:
-        state = loop.state
-    audience = sorted(_resident_ids(state))
-    msg = _append_admin_message(state, "main", payload.text, audience)
-    bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
-    # Kick off reactions if a day is live — force so an admin announcement
-    # always gets responses rather than being filtered by probability rolls.
-    if loop is not None:
-        loop.schedule_reactions(msg, depth=0, force=True)
-    await save_run(state)
+    async with state_lock(run_id):
+        state = await _get_run_for_mutation(run_id)
+        loop = active_loop(run_id)
+        audience = sorted(_resident_ids(state))
+        msg = _append_admin_message(state, "main", payload.text, audience)
+        bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
+        # Kick off reactions if a day is live — force so an admin announcement
+        # always gets responses rather than being filtered by probability rolls.
+        if loop is not None:
+            loop.schedule_reactions(msg, depth=0, force=True)
+        await save_run(state)
     return {"ok": True, "message": msg.model_dump()}
 
 
 @app.post("/api/runs/{run_id}/admin/dm")
 async def api_admin_dm(run_id: str, payload: DMPayload):
-    state = await _get_run(run_id)
-    loop = active_loop(run_id)
-    if loop is not None:
-        state = loop.state
-    if payload.recipient_id not in _resident_ids(state):
-        raise HTTPException(status_code=400, detail="Destinatario non valido")
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Messaggio vuoto")
-    members = frozenset(["admin", payload.recipient_id])
-    chat = None
-    for c in state.chats:
-        if c.kind == "dm" and frozenset(c.member_ids) == members:
-            chat = c
-            break
-    if chat is None:
-        from .models import Chat
-        other_name = next(a.persona.display_name for a in state.agents if a.persona.id == payload.recipient_id)
-        chat = Chat(
-            id=f"dm_admin_{payload.recipient_id}_{uuid4().hex[:4]}",
-            kind="dm",
-            display_name=f"DM con {other_name}",
-            member_ids=["admin", payload.recipient_id],
-            created_day=state.clock.day,
-        )
-        state.chats.append(chat)
-    msg = _append_admin_message(state, chat.id, text, [payload.recipient_id])
-    bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": chat.model_dump()})
-    # Force reaction: a private DM from the admin always deserves a reply
-    # from the recipient, not a probability roll.
-    if loop is not None:
-        loop.schedule_reactions(msg, depth=0, force=True)
-    await save_run(state)
+    async with state_lock(run_id):
+        state = await _get_run_for_mutation(run_id)
+        loop = active_loop(run_id)
+        if payload.recipient_id not in _resident_ids(state):
+            raise HTTPException(status_code=400, detail="Destinatario non valido")
+        members = frozenset(["admin", payload.recipient_id])
+        chat = None
+        for c in state.chats:
+            if c.kind == "dm" and frozenset(c.member_ids) == members:
+                chat = c
+                break
+        if chat is None:
+            from .models import Chat
+            other_name = next(a.persona.display_name for a in state.agents if a.persona.id == payload.recipient_id)
+            chat = Chat(
+                id=f"dm_admin_{payload.recipient_id}_{uuid4().hex[:4]}",
+                kind="dm",
+                display_name=f"DM con {other_name}",
+                member_ids=["admin", payload.recipient_id],
+                created_day=state.clock.day,
+            )
+            state.chats.append(chat)
+        msg = _append_admin_message(state, chat.id, text, [payload.recipient_id])
+        bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": chat.model_dump()})
+        # Force reaction: a private DM from the admin always deserves a reply
+        # from the recipient, not a probability roll.
+        if loop is not None:
+            loop.schedule_reactions(msg, depth=0, force=True)
+        await save_run(state)
     return {"ok": True, "message": msg.model_dump()}
 
 

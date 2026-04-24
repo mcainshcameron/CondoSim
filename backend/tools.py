@@ -858,6 +858,7 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
         forwarded_from_chat=source.display_name,
         forwarded_from_sender_name=orig.sender_display_name,
         forwarded_original_content=orig.content,
+        cascaded=False,
     )
     state.messages.append(fmsg)
     ctx.sent_messages_this_activation.append(fmsg)
@@ -1002,6 +1003,7 @@ def _create_and_append_message(
         wall_clock_iso=datetime.utcnow().isoformat() + "Z",
         day=state.clock.day,
         audience=audience,
+        cascaded=False,
     )
     state.messages.append(msg)
     ctx.sent_messages_this_activation.append(msg)

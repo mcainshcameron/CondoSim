@@ -134,6 +134,7 @@ def build_run_state(building_id: str, opening_text: str) -> RunState:
         wall_clock_iso=now_iso,
         day=1,
         audience=resident_ids,
+        cascaded=False,
     )
 
     # Neutral starting trust matrix — relationships accrue in MEMORY, not here.

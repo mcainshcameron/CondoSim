@@ -15,6 +15,19 @@ from .models import RunState
 # the last serializer (inside the lock) always captures the combined state.
 _save_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+# Per-run *mutation* mutex. Coarser than _save_locks: this serializes the
+# whole load -> mutate -> save critical section across admin endpoints and
+# the day-loop background task. Without it, two coroutines can each read
+# state from the DB, mutate independent copies, and the second writer wipes
+# the first writer's changes — even with _save_locks serializing the write
+# itself. Acquire this BEFORE _get_run/load_run in any path that mutates.
+_state_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def state_lock(run_id: str) -> asyncio.Lock:
+    """Per-run lock to serialize the read-modify-write window."""
+    return _state_locks[run_id]
+
 
 async def save_run(state: RunState) -> None:
     async with _save_locks[state.run_id]:

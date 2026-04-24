@@ -1007,8 +1007,8 @@ button {
 .landing-hero {
   position: relative;
   width: 100%;
-  height: 92vh;
-  min-height: 640px;
+  height: 100vh;
+  min-height: 680px;
   overflow: hidden;
   background: #2a1c1f;
   isolation: isolate;
@@ -1107,13 +1107,13 @@ button {
 .landing-cta {
   position: absolute;
   left: 50%;
-  bottom: 24px;
+  bottom: 10vh;
   transform: translateX(-50%);
   z-index: 11;
-  padding: 14px 34px;
+  padding: 16px 42px;
   font-family: 'Bebas Neue', 'Anton', sans-serif;
-  font-size: 18px;
-  letter-spacing: 0.22em;
+  font-size: 20px;
+  letter-spacing: 0.26em;
   text-transform: uppercase;
   color: #1a1210;
   background: linear-gradient(180deg, #ffd37a, #e0a845);
@@ -1138,6 +1138,57 @@ button {
     0 6px 12px rgba(0,0,0,0.35);
 }
 
+/* Pulsing chevron below the CTA, cues the user to scroll. */
+.landing-scroll-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 2.8vh;
+  transform: translateX(-50%);
+  z-index: 11;
+  color: rgba(255, 235, 210, 0.75);
+  font-size: 22px;
+  cursor: pointer;
+  user-select: none;
+  animation: landing-bob 1.6s ease-in-out infinite;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.7);
+}
+.landing-scroll-hint:hover { color: rgba(255, 235, 210, 1); }
+@keyframes landing-bob {
+  0%, 100% { transform: translate(-50%, 0); opacity: 0.75; }
+  50%      { transform: translate(-50%, 6px); opacity: 1; }
+}
+
+/* Dark transition band between hero and setup card — hosts a
+   GTA-style "NUOVA PARTITA" label so the scene break reads as
+   intentional rather than "now the game UI begins". */
+.setup-break {
+  width: 100%;
+  padding: 56px 24px 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: #120c0f;
+  scroll-margin-top: 20px;
+}
+.setup-break-line {
+  flex: 0 1 140px;
+  height: 1px;
+  background: linear-gradient(90deg,
+    rgba(255, 210, 150, 0) 0%,
+    rgba(255, 210, 150, 0.55) 50%,
+    rgba(255, 210, 150, 0) 100%);
+}
+.setup-break-label {
+  font-family: 'Bebas Neue', 'Anton', sans-serif;
+  font-size: clamp(22px, 3vw, 30px);
+  letter-spacing: 0.32em;
+  color: #ffd37a;
+  text-transform: uppercase;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+}
+
 /* On narrow screens, shrink the cutout row — otherwise they stack and
    overlap the title. Hide the background cast and keep Romano as the
    poster child. */
@@ -1150,14 +1201,16 @@ button {
 }
 
 .setup-card {
-  width: min(980px, 100%);
+  width: min(980px, calc(100% - 48px));
   background: white;
   border-radius: 14px;
-  box-shadow: var(--shadow-lg);
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.55),
+    0 2px 0 rgba(255, 210, 150, 0.12);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  margin: -40px 24px 48px;  /* pull the card up over the hero's bottom edge */
+  margin: 0 auto 72px;
   position: relative;
   z-index: 20;
 }

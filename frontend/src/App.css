@@ -1945,24 +1945,58 @@ button {
   /* --- Login screen: edge-to-edge card on tiny phones --------- */
   .login-screen { padding: 16px; }
 
-  /* --- Setup landing: scale CTA + scroll hint slightly down --- */
+  /* --- Setup landing hero: fit phone viewports --------------- */
+  /* Drop the desktop 680px floor so the CTA is reachable on
+     short phones (iPhone SE = 568px tall). Use dvh for
+     iOS Safari URL-bar correctness. */
+  .landing-hero {
+    height: 100dvh;
+    min-height: 0;
+  }
+  .landing-title-wrap { top: 5vh; width: 94%; }
+  .landing-tagline { margin-top: 10px; }
+  .cutout-romano { height: 52vh; }
+  /* CTA: keep above the iOS home indicator + thumb-reachable. */
   .landing-cta {
-    bottom: 14vh;
+    bottom: calc(11vh + env(safe-area-inset-bottom, 0));
     padding: 14px 32px;
     font-size: 17px;
     letter-spacing: 0.22em;
+    width: min(360px, calc(100% - 48px));
+    text-align: center;
   }
+  .landing-scroll-hint {
+    bottom: calc(2.4vh + env(safe-area-inset-bottom, 0));
+  }
+
+  /* --- Starter menu (setup card) ----------------------------- */
   .setup-card {
-    width: calc(100% - 24px);
+    width: calc(100% - 20px);
     border-radius: 10px;
-    margin-bottom: 36px;
+    margin-bottom: calc(28px + env(safe-area-inset-bottom, 0));
   }
-  .setup-col { padding: 18px 18px; }
+  .setup-col { padding: 16px 14px; }
+  .setup-section-title { font-size: 10.5px; }
+  .setup-rules { font-size: 12.5px; padding-left: 16px; }
+  .cast-row { padding: 8px; }
+  .cast-name { font-size: 12.5px; }
+  .cast-sub { font-size: 10.5px; }
+  .setup-compose-card { padding: 10px; }
   .setup-textarea {
     font-size: 16px; /* prevent iOS zoom */
     min-height: 140px;
   }
-  .setup-break { padding: 36px 18px 22px; }
+  .setup-compose-hint { font-size: 10.5px; }
+  .setup-start {
+    width: 100%;
+    padding: 14px 20px;
+    font-size: 15px;
+  }
+  .setup-break { padding: 32px 18px 20px; }
+  .setup-break-label { letter-spacing: 0.22em; }
+  /* Saved-runs list: tap targets + safe truncation. */
+  .setup-run-card { padding: 10px; min-height: 44px; }
+  .setup-run-id { font-size: 10.5px; }
 
   /* --- Console: more vertical headroom, smaller numbers ------- */
   .console-section { padding: 14px 12px; }

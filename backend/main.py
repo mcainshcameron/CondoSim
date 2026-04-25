@@ -555,11 +555,16 @@ async def api_close_motion(run_id: str, motion_id: str):
 @app.get("/api/runs/{run_id}/events")
 async def api_run_events(run_id: str):
     """SSE stream of live events for a run: typing indicators, new messages, day lifecycle."""
-    queue = bus().subscribe(run_id)
+    queue, replay = bus().subscribe(run_id)
 
     async def gen():
         # Initial "connected" so the client knows the stream is open
         yield "event: connected\ndata: {}\n\n"
+        # Replay recent events so subscribers that connected mid-burst (e.g. a
+        # fresh run mounting just as day 1 starts publishing) don't miss the
+        # opening flurry. Frontend dedupes by message id.
+        for ev in replay:
+            yield ev.to_sse()
         try:
             while True:
                 try:

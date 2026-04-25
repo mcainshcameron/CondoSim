@@ -1035,7 +1035,11 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
             <div className="chat-header-sub">
               {typingNames.length > 0 ? (
                 <span className="chat-header-typing">
-                  {typingNames.join(', ')} {typingNames.length === 1 ? 'sta scrivendo' : 'stanno scrivendo'}
+                  {typingNames.length === 1
+                    ? `${typingNames[0]} sta scrivendo`
+                    : typingNames.length === 2
+                      ? `${typingNames[0]} e ${typingNames[1]} stanno scrivendo`
+                      : `${typingNames.length} stanno scrivendo`}
                   <span className="dots"><span>.</span><span>.</span><span>.</span></span>
                 </span>
               ) : chatHeader.sub}
@@ -1876,7 +1880,8 @@ export default function App() {
               title={paused ? 'Riprendi il ciclo automatico dei giorni' : 'Metti in pausa — i giorni smettono di avanzare'}
               aria-label={paused ? 'Riprendi' : 'Pausa'}
             >
-              {paused ? '▶ Riprendi' : '⏸ Pausa'}
+              <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>
+              <span className="pause-btn-label">{paused ? ' Riprendi' : ' Pausa'}</span>
             </button>
           )}
           <button

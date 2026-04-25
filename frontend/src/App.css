@@ -1739,45 +1739,50 @@ button {
   html, body, #root { height: 100%; }
   .app { height: 100vh; height: 100dvh; }
 
-  /* --- Topbar: compact, two-row, drop fictional clock --------- */
+  /* --- Topbar: compact single row, drop non-essentials -------- */
+  /* Earlier this used `padding: 8px 10px env(safe-area-inset-bottom)
+     10px` — but the topbar lives at the TOP of the screen, so
+     using safe-area-inset-bottom here was a copy-paste bug that
+     padded the topbar by ~34px on iPhones with a home indicator. */
   .topbar {
-    padding: 8px 10px env(safe-area-inset-bottom, 0) 10px;
-    padding-top: max(8px, env(safe-area-inset-top, 0));
-    flex-wrap: wrap;
-    gap: 6px;
-    row-gap: 4px;
+    padding: max(8px, env(safe-area-inset-top, 0)) 10px 8px;
+    flex-wrap: nowrap;
+    gap: 8px;
   }
   .topbar-left { gap: 8px; min-width: 0; flex: 1; }
-  .topbar-logo { width: 32px; height: 32px; font-size: 18px; }
+  .topbar-logo { width: 32px; height: 32px; font-size: 18px; flex-shrink: 0; }
+  .topbar-left > div { min-width: 0; }
   .topbar h1 {
     font-size: 14px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 56vw;
   }
-  .topbar-sub { font-size: 10px; }
+  .topbar-sub {
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   /* Fictional clock duplicates topbar-sub on mobile — drop it. */
   .fictional-clock { display: none; }
+  /* Osservatore is a power-user toggle (shows hidden DMs); rare on
+     mobile, and the iOS-styled checkbox added a second visible blob
+     next to the eye. Hide on phones — desktop unchanged. */
+  .god-view-toggle { display: none; }
   .topbar-right {
     gap: 6px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
+    flex-shrink: 0;
+    flex-wrap: nowrap;
   }
   .pause-btn {
-    padding: 4px 10px;
-    font-size: 11px;
-    border-radius: 12px;
-  }
-  .help-btn {
-    width: 26px;
-    height: 26px;
+    padding: 6px 10px;
     font-size: 13px;
+    border-radius: 14px;
+    line-height: 1;
   }
-  /* "Osservatore" → eye-only on mobile to save space. */
-  .god-view-toggle { padding: 4px 8px; font-size: 14px; }
-  .god-view-toggle span { display: none; }
-  .god-view-toggle::after { content: '👁️'; }
+  .pause-btn-label { display: none; } /* icon-only on mobile */
+  .help-btn { width: 30px; height: 30px; font-size: 14px; }
   .day-badge { padding: 4px 10px; font-size: 12px; }
   .day-badge-n { font-size: 14px; }
 
@@ -1842,7 +1847,11 @@ button {
 
   /* --- Chat header: back button left, console button right ---- */
   .chat-header { padding: 8px 8px 8px 4px; gap: 8px; }
-  .chat-header-text { flex: 1; min-width: 0; }
+  .chat-header-text {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+  }
   .chat-header-title {
     font-size: 15px;
     white-space: nowrap;
@@ -1855,6 +1864,14 @@ button {
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* The desktop CSS sets `.chat-header-typing { display: inline-flex }`,
+     which makes it an atomic inline box that ignores the parent's
+     ellipsis. On mobile, render it as plain inline so the parent's
+     overflow:hidden + text-overflow: ellipsis actually clip "Conti,
+     Greco, Marchetti stanno scrivendo…". The dots animation
+     (separate <span>s) still works inline. */
+  .chat-header-typing { display: inline; }
+  .chat-header-typing .dots { display: inline-block; margin-left: 2px; }
   .mobile-back {
     display: inline-flex;
     align-items: center;
@@ -2019,7 +2036,16 @@ button {
   /* --- Long-content safety on small bubbles ------------------- */
   /* Italian neighbour names + URLs occasionally exceed the bubble
      width; let them break inside the word rather than push the row
-     past max-width. */
+     past max-width. The min-width:0 on .msg is what actually lets
+     the flex child shrink below its content's intrinsic min-width
+     — without it, the avatar+bubble row can extend past the
+     viewport even though .msg-row has max-width: 88%. */
+  .msg-row { min-width: 0; }
+  .msg {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+  }
   .msg .content { overflow-wrap: anywhere; word-break: break-word; }
 
   /* --- Native-feeling scroll on iOS --------------------------- */

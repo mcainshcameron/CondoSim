@@ -1846,7 +1846,19 @@ button {
   }
 
   /* --- Chat header: back button left, console button right ---- */
-  .chat-header { padding: 8px 8px 8px 4px; gap: 8px; }
+  /* Belt-and-braces width guard: even if a child overflows, the
+     header itself is locked to the chat-col width and clips. The
+     `min-width: 0` on .chat-col is what breaks the default
+     min-content width of grid items — without it, a wide child
+     could push the column past 100vw and reintroduce horizontal
+     scroll despite body { overflow-x: hidden }. */
+  .chat-col { min-width: 0; max-width: 100%; overflow: hidden; }
+  .chat-header {
+    padding: 8px 8px 8px 4px;
+    gap: 8px;
+    max-width: 100%;
+    overflow: hidden;
+  }
   .chat-header-text {
     flex: 1 1 0;
     min-width: 0;

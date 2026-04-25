@@ -1372,39 +1372,49 @@ export default function App() {
   // MESSAGE_RENDER_GAP_MS so the chat is readable instead of flashing.
   const nextRenderSlotRef = useRef(0);
 
-  // Watchdog: while we believe a day is in progress, poll the API every 30s
-  // to catch the case where the day actually finished server-side but the
-  // day_done SSE event was dropped (Heroku H18, browser tab throttled,
-  // EventSource not reconnecting cleanly). If the polled state shows the
-  // clock has reached day_end_minutes for the current day OR the run ended,
-  // unstick the UI and chain the next advance — same effect as if day_done
-  // had fired normally. SSE remains the fast path; this is just insurance.
+  // Watchdog: while a day is in progress, poll the API every 5s and merge
+  // anything we don't yet have. SSE is the fast path, but it dies silently
+  // on mobile Safari (tab backgrounded, device sleeps, network blip) and
+  // also under Heroku H18 / corporate proxies. Without this, the UI sits
+  // frozen on the last event we received until the user refreshes.
+  // Returning prev unchanged when nothing's new avoids wasted re-renders.
   useEffect(() => {
     if (!state?.run_id || !working) return;
     const runId = state.run_id;
     const id = setInterval(() => {
       api.getRun(runId).then(fresh => {
-        // day_end_minutes(d) = (d - 1) * 1440 + 23 * 60. If clock has reached
-        // or passed that, the day's loop has finished server-side.
-        const dayEndMin = (fresh.clock.day - 1) * 1440 + 23 * 60;
-        const dayFinished = fresh.clock.minutes_since_start >= dayEndMin;
-        if (!dayFinished && !fresh.ended) return;
-        // Catch up: merge the state, clear working, schedule next.
         setState(prev => {
           if (!prev) return fresh;
-          const byId = new Map(fresh.messages.map(m => [m.id, m]));
-          for (const m of prev.messages) if (!byId.has(m.id)) byId.set(m.id, m);
-          return { ...fresh, messages: Array.from(byId.values()).sort(
-            (a, b) => a.fictional_timestamp_minutes - b.fictional_timestamp_minutes
-          ) };
+          const have = new Set(prev.messages.map(m => m.id));
+          const extras = fresh.messages.filter(m => !have.has(m.id));
+          const motionsChanged =
+            (prev.motions?.length || 0) !== (fresh.motions?.length || 0);
+          const clockChanged =
+            prev.clock.minutes_since_start !== fresh.clock.minutes_since_start;
+          if (extras.length === 0 && !motionsChanged && !clockChanged) return prev;
+          const merged = extras.length
+            ? [...prev.messages, ...extras].sort(
+                (a, b) => a.fictional_timestamp_minutes - b.fictional_timestamp_minutes
+              )
+            : prev.messages;
+          return { ...fresh, messages: merged };
         });
-        setWorking(false);
-        setDayStartedAt(null);
-        if (!pausedRef.current && !fresh.ended && fresh.clock.day < 14) {
-          setNextAdvanceAt(Date.now() + 3000);
+
+        // day_end_minutes(d) = (d - 1) * 1440 + 23 * 60. If the clock has
+        // reached or passed that, the day's loop has finished server-side
+        // even if the day_done SSE never arrived — unstick the UI and
+        // chain the next advance.
+        const dayEndMin = (fresh.clock.day - 1) * 1440 + 23 * 60;
+        const dayFinished = fresh.clock.minutes_since_start >= dayEndMin;
+        if (dayFinished || fresh.ended) {
+          setWorking(false);
+          setDayStartedAt(null);
+          if (!pausedRef.current && !fresh.ended && fresh.clock.day < 14) {
+            setNextAdvanceAt(Date.now() + 3000);
+          }
         }
       }).catch(() => {});
-    }, 30000);
+    }, 5000);
     return () => clearInterval(id);
   }, [state?.run_id, working]);
 
@@ -1525,14 +1535,11 @@ export default function App() {
   useEffect(() => {
     if (!state?.run_id) return;
     const runId = state.run_id;
-    const es = new EventSource(`${BACKEND}/api/runs/${runId}/events`);
+    let es = null;
 
-    // Every time the stream (re)opens — initial connect AND after a browser
-    // auto-reconnect following a network drop — refetch the run so we catch
-    // any messages that were published while we were disconnected. Without
-    // this, a 30s+ blip (slow LLM call, Heroku router hiccup) can leave the
-    // UI permanently behind DB state until the page is manually refreshed.
-    es.addEventListener('open', () => {
+    // Refetch the run and merge any messages we missed. Called both on
+    // every SSE (re)open and whenever the tab regains visibility.
+    const refetchAndMerge = () => {
       api.getRun(runId).then(fresh => {
         setState(prev => {
           if (!prev) return fresh;
@@ -1543,7 +1550,7 @@ export default function App() {
           ) };
         });
       }).catch(() => {});
-    });
+    };
 
     // Render a message_sent payload into state. Pure side-effect — same
     // logic for both the immediate path (admin) and the delayed path
@@ -1572,141 +1579,175 @@ export default function App() {
       }
     };
 
-    es.addEventListener('message_sent', (e) => {
-      const payload = JSON.parse(e.data).data;
-      const msg = payload.message;
-      // Admin's own send: render instantly (their action, no need to pace).
-      if (msg.sender_kind === 'admin') {
-        renderIncomingMessage(payload);
-        return;
-      }
-      // Resident sends: claim the next "slot" so consecutive resident
-      // messages from the same SSE burst spread out by MESSAGE_RENDER_GAP_MS.
-      // The slot reservation is an upper bound — if no one's sending, the
-      // ref stays in the past and the next message renders immediately.
-      const now = Date.now();
-      const slot = Math.max(now, nextRenderSlotRef.current);
-      nextRenderSlotRef.current = slot + MESSAGE_RENDER_GAP_MS;
-      const delay = slot - now;
-      if (delay <= 0) {
-        renderIncomingMessage(payload);
-      } else {
-        setTimeout(() => renderIncomingMessage(payload), delay);
-      }
-    });
+    // Wire all listeners onto a fresh EventSource. We close+recreate (vs.
+    // letting the browser auto-reconnect) on visibilitychange and on hard
+    // errors, because mobile Safari's native auto-reconnect is unreliable
+    // — readyState often stays OPEN on a dead socket after sleep/wake.
+    const connect = () => {
+      if (es) es.close();
+      es = new EventSource(`${BACKEND}/api/runs/${runId}/events`);
 
-    es.addEventListener('typing_start', (e) => {
-      const d = JSON.parse(e.data).data;
-      setTypingAgents(prev => ({ ...prev, [d.agent_id]: d.display_name }));
-    });
+      // Every (re)open refetches the run so we catch anything the stream
+      // missed while disconnected.
+      es.addEventListener('open', refetchAndMerge);
 
-    es.addEventListener('typing_stop', (e) => {
-      const d = JSON.parse(e.data).data;
-      setTypingAgents(prev => {
-        const next = { ...prev };
-        delete next[d.agent_id];
-        return next;
-      });
-    });
-
-    es.addEventListener('day_start', (e) => {
-      const d = JSON.parse(e.data).data;
-      setDayStatus(`Giorno ${d.day} in corso…`);
-      setDayStartedAt(Date.now());
-      setNextAdvanceAt(null);
-    });
-
-    es.addEventListener('day_end', (e) => {
-      const d = JSON.parse(e.data).data;
-      setDayStatus(`Giorno ${d.day} concluso: ${d.activations} attivazioni, ${d.total_messages} messaggi totali.`);
-      setDayStartedAt(null);
-      setTypingAgents({});
-      // NB: do NOT chain the next day or clear `working` here. day_end fires
-      // mid-lifecycle while the per-run lock is still held (memory
-      // consolidation is still running). Chaining lives in the day_done
-      // handler below, which fires AFTER the lock is released.
-    });
-
-    es.addEventListener('day_done', (e) => {
-      const d = JSON.parse(e.data).data;
-      setWorking(false);
-      setDayStartedAt(null);
-      // Refresh authoritative state (clock, trust, motions, agent.notes
-      // cleared by memory consolidation). Preserve any messages we already
-      // streamed in via SSE so we don't drop ones the server hasn't yet
-      // round-tripped.
-      api.getRun(state.run_id).then(fresh => {
-        setState(prev => {
-          if (!prev) return fresh;
-          const seen = new Set(fresh.messages.map(m => m.id));
-          const extras = prev.messages.filter(m => !seen.has(m.id));
-          return { ...fresh, messages: [...fresh.messages, ...extras] };
-        });
-        if (!d.ok) {
-          setDayStatus('Errore: il giorno non è terminato correttamente.');
+      es.addEventListener('message_sent', (e) => {
+        const payload = JSON.parse(e.data).data;
+        const msg = payload.message;
+        // Admin's own send: render instantly (their action, no need to pace).
+        if (msg.sender_kind === 'admin') {
+          renderIncomingMessage(payload);
           return;
         }
-        const nextDay = (fresh.clock?.day ?? 0) + 1;
-        if (!pausedRef.current && !fresh.ended && nextDay <= 14) {
-          setNextAdvanceAt(Date.now() + 3000);
+        // Resident sends: claim the next "slot" so consecutive resident
+        // messages from the same SSE burst spread out by MESSAGE_RENDER_GAP_MS.
+        // The slot reservation is an upper bound — if no one's sending, the
+        // ref stays in the past and the next message renders immediately.
+        const now = Date.now();
+        const slot = Math.max(now, nextRenderSlotRef.current);
+        nextRenderSlotRef.current = slot + MESSAGE_RENDER_GAP_MS;
+        const delay = slot - now;
+        if (delay <= 0) {
+          renderIncomingMessage(payload);
+        } else {
+          setTimeout(() => renderIncomingMessage(payload), delay);
         }
-      }).catch(() => {});
-    });
-
-    es.addEventListener('motion_filed', (e) => {
-      const d = JSON.parse(e.data).data;
-      setState(prev => {
-        if (!prev) return prev;
-        if ((prev.motions || []).some(m => m.id === d.motion.id)) return prev;
-        return { ...prev, motions: [...(prev.motions || []), d.motion] };
       });
-    });
 
-    es.addEventListener('vote_cast', (e) => {
-      const d = JSON.parse(e.data).data;
-      setState(prev => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          motions: (prev.motions || []).map(m =>
-            m.id === d.motion_id ? { ...m, votes: { ...(m.votes || {}), [d.agent_id]: d.choice } } : m
-          ),
-        };
+      es.addEventListener('typing_start', (e) => {
+        const d = JSON.parse(e.data).data;
+        setTypingAgents(prev => ({ ...prev, [d.agent_id]: d.display_name }));
       });
-    });
 
-    es.addEventListener('motion_closed', (e) => {
-      const d = JSON.parse(e.data).data;
-      setState(prev => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          motions: (prev.motions || []).map(m => m.id === d.motion.id ? d.motion : m),
-        };
+      es.addEventListener('typing_stop', (e) => {
+        const d = JSON.parse(e.data).data;
+        setTypingAgents(prev => {
+          const next = { ...prev };
+          delete next[d.agent_id];
+          return next;
+        });
       });
-      // Pull fresh state (trust matrix + dials updated server-side)
-      api.getRun(state.run_id).then(fresh => {
-        setState(prev => prev ? { ...fresh, messages: prev.messages } : fresh);
-      }).catch(() => {});
-    });
 
-    es.addEventListener('trust_updated', () => {
-      // Re-fetch run for the authoritative trust matrix
-      api.getRun(state.run_id).then(fresh => {
-        setState(prev => prev ? { ...prev, trust: fresh.trust } : prev);
-      }).catch(() => {});
-    });
+      es.addEventListener('day_start', (e) => {
+        const d = JSON.parse(e.data).data;
+        setDayStatus(`Giorno ${d.day} in corso…`);
+        setDayStartedAt(Date.now());
+        setNextAdvanceAt(null);
+      });
 
-    es.addEventListener('error', (e) => {
-      console.error('SSE error event', e);
-    });
+      es.addEventListener('day_end', (e) => {
+        const d = JSON.parse(e.data).data;
+        setDayStatus(`Giorno ${d.day} concluso: ${d.activations} attivazioni, ${d.total_messages} messaggi totali.`);
+        setDayStartedAt(null);
+        setTypingAgents({});
+        // NB: do NOT chain the next day or clear `working` here. day_end fires
+        // mid-lifecycle while the per-run lock is still held (memory
+        // consolidation is still running). Chaining lives in the day_done
+        // handler below, which fires AFTER the lock is released.
+      });
 
-    es.onerror = (err) => {
-      console.warn('EventSource error; will reconnect', err);
+      es.addEventListener('day_done', (e) => {
+        const d = JSON.parse(e.data).data;
+        setWorking(false);
+        setDayStartedAt(null);
+        // Refresh authoritative state (clock, trust, motions, agent.notes
+        // cleared by memory consolidation). Preserve any messages we already
+        // streamed in via SSE so we don't drop ones the server hasn't yet
+        // round-tripped.
+        api.getRun(runId).then(fresh => {
+          setState(prev => {
+            if (!prev) return fresh;
+            const seen = new Set(fresh.messages.map(m => m.id));
+            const extras = prev.messages.filter(m => !seen.has(m.id));
+            return { ...fresh, messages: [...fresh.messages, ...extras] };
+          });
+          if (!d.ok) {
+            setDayStatus('Errore: il giorno non è terminato correttamente.');
+            return;
+          }
+          const nextDay = (fresh.clock?.day ?? 0) + 1;
+          if (!pausedRef.current && !fresh.ended && nextDay <= 14) {
+            setNextAdvanceAt(Date.now() + 3000);
+          }
+        }).catch(() => {});
+      });
+
+      es.addEventListener('motion_filed', (e) => {
+        const d = JSON.parse(e.data).data;
+        setState(prev => {
+          if (!prev) return prev;
+          if ((prev.motions || []).some(m => m.id === d.motion.id)) return prev;
+          return { ...prev, motions: [...(prev.motions || []), d.motion] };
+        });
+      });
+
+      es.addEventListener('vote_cast', (e) => {
+        const d = JSON.parse(e.data).data;
+        setState(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            motions: (prev.motions || []).map(m =>
+              m.id === d.motion_id ? { ...m, votes: { ...(m.votes || {}), [d.agent_id]: d.choice } } : m
+            ),
+          };
+        });
+      });
+
+      es.addEventListener('motion_closed', (e) => {
+        const d = JSON.parse(e.data).data;
+        setState(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            motions: (prev.motions || []).map(m => m.id === d.motion.id ? d.motion : m),
+          };
+        });
+        // Pull fresh state (trust matrix + dials updated server-side)
+        api.getRun(runId).then(fresh => {
+          setState(prev => prev ? { ...fresh, messages: prev.messages } : fresh);
+        }).catch(() => {});
+      });
+
+      es.addEventListener('trust_updated', () => {
+        // Re-fetch run for the authoritative trust matrix
+        api.getRun(runId).then(fresh => {
+          setState(prev => prev ? { ...prev, trust: fresh.trust } : prev);
+        }).catch(() => {});
+      });
+
+      es.addEventListener('error', (e) => {
+        console.error('SSE error event', e);
+      });
+
+      es.onerror = (err) => {
+        // Browser will auto-retry transient drops. If the socket has been
+        // CLOSED (no auto-reconnect coming), recreate explicitly so we
+        // don't sit on a dead stream.
+        console.warn('EventSource error', err);
+        if (es && es.readyState === 2 /* CLOSED */) {
+          setTimeout(connect, 1000);
+        }
+      };
     };
 
+    // When the tab becomes visible again, refetch immediately and force a
+    // fresh SSE connection. Mobile Safari frequently kills the socket
+    // silently when the device sleeps or the tab backgrounds; readyState
+    // can still report OPEN on a dead stream, so explicit reconnect is
+    // the only reliable recovery.
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      refetchAndMerge();
+      connect();
+    };
+
+    connect();
+    document.addEventListener('visibilitychange', onVisibility);
+
     return () => {
-      es.close();
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (es) es.close();
     };
   }, [state?.run_id]);
 

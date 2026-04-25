@@ -346,23 +346,85 @@ def _resolve_chat(state: RunState, ref: str, current_agent_id: str | None = None
 DM_REPLY_COOLDOWN_MIN = 240  # fictional minutes to wait before re-DMing the same chat without a reply
 
 
+# Tiny Italian stopword set — function words, common pronouns, fillers. Kept
+# small on purpose: removing them tightens the content fingerprint without
+# stripping enough to make every short message look identical.
+_IT_STOPWORDS = frozenset({
+    "che", "cosa", "come", "dove", "quando", "perche", "perché",
+    "una", "uno", "del", "della", "delle", "degli", "dei", "dal", "dalla",
+    "nel", "nella", "sul", "sulla", "con", "per", "tra", "fra",
+    "non", "anche", "ancora", "molto", "tanto", "tutto", "tutti", "tutta", "tutte",
+    "qua", "qui", "lì", "li", "là", "la", "lo", "le", "gli", "il",
+    "ho", "hai", "ha", "abbiamo", "avete", "hanno",
+    "sono", "sei", "siamo", "siete", "stato", "stata",
+    "mi", "ti", "ci", "si", "vi", "ne",
+    "ma", "se", "già", "gia", "poi", "qualcuno", "qualcosa",
+    "ragazzi", "scusa", "scusate", "grazie", "ciao", "buongiorno", "salve",
+    "davvero", "magari", "forse", "proprio", "solo", "ora", "adesso",
+})
+
+# Strip every non-alphanumeric character (punctuation, emoji), keep Italian
+# accented letters. Lowercased upstream.
+_TOKEN_STRIP = re.compile(r"[^0-9a-zàèéìòùç]+")
+
+# Intent patterns: when two messages from the same sender both match the same
+# pattern within a short fictional window, the textual wording is irrelevant —
+# the *function* of the message is identical, which is the failure mode the
+# agents fall into (e.g., Sig.ra Conti at 10:08 and 10:21 both demanding an
+# explanation with different words).
+_INTENT_PATTERNS = {
+    "demand_explanation": re.compile(
+        r"(?:spieg(?:a|hi|are|atemi|atelo|atemelo)|"
+        r"chiari(?:re|sci|scimi|scitemi)|"
+        r"cosa\s+(?:succede|succ|sta\s+succedendo)|"
+        r"che\s+(?:cosa|sta)\s+(?:è|e)?\s*succe|"
+        r"qualcuno\s+(?:mi\s+)?(?:sa|spieg|dica|dice))",
+        re.IGNORECASE,
+    ),
+    "press_for_response": re.compile(
+        r"(?:rispondi(?:mi)?|batti\s+un\s+colpo|fatti\s+sentire|ci\s+sei\??|"
+        r"ti\s+leggiamo|ci\s+stai\s+(?:ignorando|leggendo)|aspettiamo)",
+        re.IGNORECASE,
+    ),
+}
+
+_INTENT_REPEAT_WINDOW_MIN = 180  # fictional minutes within which a same-intent repeat counts as a dup
+
+
+def _intent_of(text: str) -> str | None:
+    for label, pat in _INTENT_PATTERNS.items():
+        if pat.search(text or ""):
+            return label
+    return None
+
+
 def _tokens(s: str) -> set[str]:
-    """Lowercase words longer than 2 characters — rough content fingerprint."""
-    return {w for w in (s or "").lower().split() if len(w) > 2}
+    """Content tokens: lowercase, punctuation stripped, stopwords removed,
+    longer than 2 characters. The result is what we compare for similarity."""
+    out: set[str] = set()
+    for raw in (s or "").lower().split():
+        clean = _TOKEN_STRIP.sub("", raw)
+        if len(clean) <= 2 or clean in _IT_STOPWORDS:
+            continue
+        out.add(clean)
+    return out
 
 
 def _is_near_duplicate(state: RunState, chat_id: str, sender_id: str, text: str) -> bool:
     """Catch near-duplicate sends from the same agent in the same chat.
 
-    Three checks against the last few messages from this sender in this chat (today):
+    Checks against the last few messages from this sender in this chat (today):
     - shared ≥25-char opener
     - one fully contained in the other
-    - ≥60% shared content words (catches thematic duplicates with varied wording)
+    - shared content words ≥ threshold (60% by default; 45% for short messages
+      where literal-word overlap is naturally lower but intent often identical)
     """
     norm = " ".join((text or "").lower().split())
     if len(norm) < 15:
         return False
     norm_tokens = _tokens(norm)
+    norm_intent = _intent_of(text)
+    now_min = state.clock.minutes_since_start
     day = state.clock.day
     checked = 0
     max_check = 5
@@ -377,13 +439,24 @@ def _is_near_duplicate(state: RunState, chat_id: str, sender_id: str, text: str)
             return True
         if (len(norm) >= 25 and norm in prev) or (len(prev) >= 25 and prev in norm):
             return True
+        # Intent-pattern repeat: two messages whose *function* is identical
+        # within ~3 fictional hours count as duplicates regardless of wording.
+        # Catches the "qualcuno spieghi" / "che cosa succede" pile-up where
+        # the agent rephrases the same demand each time.
+        if norm_intent is not None and _intent_of(m.content) == norm_intent:
+            elapsed = now_min - m.fictional_timestamp_minutes
+            if elapsed < _INTENT_REPEAT_WINDOW_MIN:
+                return True
         # Word-overlap similarity: catches "Davide, scusa, ho letto..." vs
-        # "Giulia, ho visto ora il tuo messaggio..." — same intent, different wording.
+        # "Giulia, ho visto ora il tuo messaggio..." — same intent, different
+        # wording. Threshold drops for short emotional outbursts where the
+        # shared content tokens are sparse.
         prev_tokens = _tokens(prev)
-        if len(norm_tokens) >= 5 and len(prev_tokens) >= 5:
+        if len(norm_tokens) >= 3 and len(prev_tokens) >= 3:
             shared = norm_tokens & prev_tokens
             smaller = min(len(norm_tokens), len(prev_tokens))
-            if smaller > 0 and len(shared) / smaller >= 0.6:
+            threshold = 0.45 if smaller < 8 else 0.60
+            if smaller > 0 and len(shared) / smaller >= threshold:
                 return True
         checked += 1
         if checked >= max_check:

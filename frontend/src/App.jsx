@@ -7,11 +7,14 @@ import Login from './Login.jsx';
 // api.js — see api.js for the env var.
 const BACKEND = apiBase;
 
-// Minimum gap between two consecutive resident messages rendering in the
-// chat. Bursts (whole batch arriving at once) get spread out so the user
-// can read them. Admin's own messages still render instantly. Tweak here
-// if you want a slower/faster cadence.
-const MESSAGE_RENDER_GAP_MS = 3000;
+// Resident messages render at a wall-clock pace derived from their
+// fictional-time delta — the agents already produce a natural rhythm
+// (1–4 fic min within an activation, 5–360 between activations), so we
+// honour it. Bursts feel rapid, lulls breathe. Admin sends still render
+// instantly. Floor + cap keep both extremes humane.
+const REAL_MS_PER_FIC_MIN = 400;
+const MIN_RENDER_GAP_MS = 2500;
+const MAX_RENDER_GAP_MS = 8000;
 
 function formatItalianDateTime(fictionalStartIso, minutesSinceStart) {
   const base = new Date(fictionalStartIso);
@@ -1367,10 +1370,13 @@ export default function App() {
   const pausedRef = useRef(paused);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
 
-  // Wall-clock ms when the next resident message is allowed to render.
-  // The message_sent SSE handler reads/writes this to spread bursts out by
-  // MESSAGE_RENDER_GAP_MS so the chat is readable instead of flashing.
+  // Wall-clock ms when the next resident message is allowed to render, and
+  // the fictional-minute timestamp of the most recently scheduled render.
+  // The message_sent SSE handler reads/writes both to derive each new
+  // render's gap from the fictional-time delta — bursts stay tight, lulls
+  // breathe — instead of pacing every message at a fixed cadence.
   const nextRenderSlotRef = useRef(0);
+  const lastRenderedFicMinRef = useRef(null);
 
   // Watchdog: while a day is in progress, poll the API every 5s and merge
   // anything we don't yet have. SSE is the fast path, but it dies silently
@@ -1410,7 +1416,7 @@ export default function App() {
           setWorking(false);
           setDayStartedAt(null);
           if (!pausedRef.current && !fresh.ended && fresh.clock.day < 14) {
-            setNextAdvanceAt(Date.now() + 3000);
+            setNextAdvanceAt(Date.now() + 12000);
           }
         }
       }).catch(() => {});
@@ -1466,7 +1472,7 @@ export default function App() {
   // the backend POST returns (and the per-run lock has been released).
   useEffect(() => {
     if (!state?.run_id || state.ended || working || paused) return;
-    setNextAdvanceAt(Date.now() + 2500);
+    setNextAdvanceAt(Date.now() + 12000);
   }, [state?.run_id]);
 
   // Fire the auto-advance once its scheduled time elapses.
@@ -1596,17 +1602,28 @@ export default function App() {
         const msg = payload.message;
         // Admin's own send: render instantly (their action, no need to pace).
         if (msg.sender_kind === 'admin') {
+          lastRenderedFicMinRef.current = msg.fictional_timestamp_minutes;
           renderIncomingMessage(payload);
           return;
         }
-        // Resident sends: claim the next "slot" so consecutive resident
-        // messages from the same SSE burst spread out by MESSAGE_RENDER_GAP_MS.
-        // The slot reservation is an upper bound — if no one's sending, the
-        // ref stays in the past and the next message renders immediately.
+        // Resident sends: pace each render by the fictional-time delta
+        // since the last rendered message. Tight bursts (1–5 fic min apart)
+        // hit the floor; long lulls (30+ fic min) hit the cap. The slot ref
+        // absorbs real wall-clock delays — if SSE was idle long enough that
+        // the gap already elapsed, the next message renders immediately.
         const now = Date.now();
-        const slot = Math.max(now, nextRenderSlotRef.current);
-        nextRenderSlotRef.current = slot + MESSAGE_RENDER_GAP_MS;
-        const delay = slot - now;
+        const lastFic = lastRenderedFicMinRef.current;
+        const ficDelta = lastFic == null
+          ? 0
+          : Math.max(0, msg.fictional_timestamp_minutes - lastFic);
+        const gap = Math.max(
+          MIN_RENDER_GAP_MS,
+          Math.min(ficDelta * REAL_MS_PER_FIC_MIN, MAX_RENDER_GAP_MS),
+        );
+        const renderAt = Math.max(now, nextRenderSlotRef.current);
+        nextRenderSlotRef.current = renderAt + gap;
+        lastRenderedFicMinRef.current = msg.fictional_timestamp_minutes;
+        const delay = renderAt - now;
         if (delay <= 0) {
           renderIncomingMessage(payload);
         } else {
@@ -1667,7 +1684,7 @@ export default function App() {
           }
           const nextDay = (fresh.clock?.day ?? 0) + 1;
           if (!pausedRef.current && !fresh.ended && nextDay <= 14) {
-            setNextAdvanceAt(Date.now() + 3000);
+            setNextAdvanceAt(Date.now() + 12000);
           }
         }).catch(() => {});
       });

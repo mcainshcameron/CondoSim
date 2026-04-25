@@ -1706,3 +1706,276 @@ button {
   border-radius: 3px;
   font-size: 11px;
 }
+
+/* ============================================================
+   Mobile-only nav buttons (back / open-console). Hidden on
+   desktop; revealed inside the mobile @media block below.
+   ============================================================ */
+.mobile-back,
+.mobile-console-btn,
+.mobile-console-link,
+.console-mobile-bar {
+  display: none;
+}
+
+/* ============================================================
+   Mobile layout (≤768px)
+   ============================================================
+   Strategy: collapse the 3-column grid into a single-column
+   "view stack" controlled by `data-mobile-view` on .main.
+   Only one panel is visible at a time on mobile; back/console
+   buttons in headers navigate between them. Desktop is
+   untouched — this whole block is no-op above 768px.
+   ============================================================ */
+@media (max-width: 768px) {
+  /* Use full visible viewport (handles iOS Safari URL bar). */
+  html, body, #root { height: 100%; }
+  .app { height: 100vh; height: 100dvh; }
+
+  /* --- Topbar: compact, two-row, drop fictional clock --------- */
+  .topbar {
+    padding: 8px 10px env(safe-area-inset-bottom, 0) 10px;
+    padding-top: max(8px, env(safe-area-inset-top, 0));
+    flex-wrap: wrap;
+    gap: 6px;
+    row-gap: 4px;
+  }
+  .topbar-left { gap: 8px; min-width: 0; flex: 1; }
+  .topbar-logo { width: 32px; height: 32px; font-size: 18px; }
+  .topbar h1 {
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 56vw;
+  }
+  .topbar-sub { font-size: 10px; }
+  /* Fictional clock duplicates topbar-sub on mobile — drop it. */
+  .fictional-clock { display: none; }
+  .topbar-right {
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .pause-btn {
+    padding: 4px 10px;
+    font-size: 11px;
+    border-radius: 12px;
+  }
+  .help-btn {
+    width: 26px;
+    height: 26px;
+    font-size: 13px;
+  }
+  /* "Osservatore" → eye-only on mobile to save space. */
+  .god-view-toggle { padding: 4px 8px; font-size: 14px; }
+  .god-view-toggle span { display: none; }
+  .god-view-toggle::after { content: '👁️'; }
+  .day-badge { padding: 4px 10px; font-size: 12px; }
+  .day-badge-n { font-size: 14px; }
+
+  /* --- Main: single-column view stack ------------------------- */
+  .main {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+  .main > .panel,
+  .main > .chat-col,
+  .main > .console {
+    grid-column: 1;
+    grid-row: 1;
+    border-left: none;
+    border-right: none;
+    min-width: 0;
+  }
+  /* Default: hide all three; show whichever data-mobile-view selects. */
+  .main > .panel,
+  .main > .chat-col,
+  .main > .console {
+    display: none;
+  }
+  .main[data-mobile-view="chats"]    > .panel    { display: block; }
+  .main[data-mobile-view="messages"] > .chat-col { display: grid; }
+  .main[data-mobile-view="admin"]    > .console  { display: flex; }
+
+  /* --- Chat list: tighter rows, slightly bigger tap area ------ */
+  .chat-list-row { padding: 12px 14px; }
+  .chat-list-name { font-size: 14.5px; }
+  .chat-list-preview { font-size: 13px; }
+
+  /* Resident cards: keep description visible but shorter. */
+  .resident-card { padding: 12px 14px; }
+  .resident-card .desc { -webkit-line-clamp: 1; }
+
+  /* Mobile-only "Console amministratore" entry above the chat list. */
+  .mobile-console-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    background: var(--brand);
+    color: white;
+    border: none;
+    padding: 12px 14px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+  }
+  .mobile-console-link:active { background: var(--brand-dark); }
+  .mobile-console-link-badge {
+    background: rgba(255,255,255,0.25);
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+
+  /* --- Chat header: back button left, console button right ---- */
+  .chat-header { padding: 8px 8px 8px 4px; gap: 8px; }
+  .chat-header-text { flex: 1; min-width: 0; }
+  .chat-header-title {
+    font-size: 15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .chat-header-sub {
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .mobile-back {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: transparent;
+    border: none;
+    color: var(--brand);
+    font-size: 28px;
+    line-height: 1;
+    padding: 0 0 4px 0;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+  .mobile-back:active { background: rgba(0, 128, 105, 0.12); }
+  .mobile-console-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: transparent;
+    border: none;
+    font-size: 18px;
+    flex-shrink: 0;
+    cursor: pointer;
+    margin-left: auto;
+  }
+  .mobile-console-btn:active { background: rgba(0, 128, 105, 0.12); }
+
+  /* --- Console: mobile bar with back button -------------------- */
+  .console-mobile-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .console-mobile-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  /* --- Messages: wider bubbles, smaller side padding ---------- */
+  .chat-messages { padding: 12px 10px; }
+  .msg-row { max-width: 88%; }
+  .msg .content { font-size: 14.5px; padding-right: 44px; }
+
+  /* --- Composer: 16px font (prevents iOS auto-zoom),
+         44px touch target on send button --------------------- */
+  .chat-composer {
+    padding: 8px 8px calc(10px + env(safe-area-inset-bottom, 0));
+    gap: 6px;
+  }
+  .chat-composer-row { gap: 6px; }
+  .chat-composer-input {
+    font-size: 16px;
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+  .chat-composer-send {
+    width: 44px;
+    height: 44px;
+    font-size: 20px;
+  }
+  .chat-composer-label { font-size: 10px; }
+  .chat-composer-hint { display: none; }
+
+  /* --- Modals: full-bleed-ish on phones ----------------------- */
+  .modal {
+    width: 96%;
+    max-height: 92vh;
+    border-radius: 10px;
+  }
+  .modal-header { padding: 14px 16px 10px; }
+  .modal-header h2 { font-size: 17px; }
+  .modal-section { padding: 12px 16px; }
+  .modal-section h3 { font-size: 11px; }
+  .profile-trust-grid { grid-template-columns: 1fr; }
+
+  /* Profile vote rows — labels can wrap on narrow screens. */
+  .profile-vote { grid-template-columns: 20px 1fr auto; gap: 6px; }
+
+  /* --- Day status bar: leave room for compact text ------------ */
+  .day-status-bar { font-size: 11px; padding: 6px 12px; }
+
+  /* --- Login screen: edge-to-edge card on tiny phones --------- */
+  .login-screen { padding: 16px; }
+
+  /* --- Setup landing: scale CTA + scroll hint slightly down --- */
+  .landing-cta {
+    bottom: 14vh;
+    padding: 14px 32px;
+    font-size: 17px;
+    letter-spacing: 0.22em;
+  }
+  .setup-card {
+    width: calc(100% - 24px);
+    border-radius: 10px;
+    margin-bottom: 36px;
+  }
+  .setup-col { padding: 18px 18px; }
+  .setup-textarea {
+    font-size: 16px; /* prevent iOS zoom */
+    min-height: 140px;
+  }
+  .setup-break { padding: 36px 18px 22px; }
+
+  /* --- Console: more vertical headroom, smaller numbers ------- */
+  .console-section { padding: 14px 12px; }
+  .motion-card { padding: 10px; }
+  .console textarea, .console select, .console input {
+    font-size: 16px; /* prevent iOS zoom */
+  }
+}
+
+/* Very small phones: trim further so the topbar still fits. */
+@media (max-width: 380px) {
+  .topbar h1 { max-width: 48vw; font-size: 13px; }
+  .pause-btn { padding: 4px 8px; font-size: 10.5px; }
+  .day-badge { padding: 3px 8px; }
+}
+

@@ -570,7 +570,7 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
 }
 
-function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, godView, onOpenProfile }) {
+function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, godView, onOpenProfile, onOpenConsole }) {
   // Compute DM partner counts + trust edges from current state
   const nameById = useMemo(() => {
     const m = {};
@@ -673,8 +673,22 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
     return pairs;
   }, [state.motions]);
 
+  const openMotionsCount = (state.motions || []).filter(m => m.status === 'open').length;
+
   return (
     <div className="panel">
+      {onOpenConsole && (
+        <button
+          type="button"
+          className="mobile-console-link"
+          onClick={onOpenConsole}
+        >
+          <span>📋 Console amministratore</span>
+          {openMotionsCount > 0 && (
+            <span className="mobile-console-link-badge">{openMotionsCount}</span>
+          )}
+        </button>
+      )}
       <div className="panel-title">Chat</div>
       <div className="chat-list">
         {chatListItems.length === 0 && (
@@ -933,7 +947,7 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
   );
 }
 
-function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView, suggestions, onSendAnnounce, onSendDm, onOpenProfile }) {
+function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView, suggestions, onSendAnnounce, onSendDm, onOpenProfile, onMobileBack, onOpenConsole }) {
   const chats = visibleChatsForAdmin(state, godView);
   const msgsByChat = useMemo(() => {
     const m = new Map();
@@ -1006,6 +1020,15 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
           onClick={() => headerClickable && onOpenProfile(dmOtherId)}
           title={headerClickable ? 'Apri profilo' : undefined}
         >
+          {onMobileBack && (
+            <button
+              type="button"
+              className="mobile-back"
+              onClick={(e) => { e.stopPropagation(); onMobileBack(); }}
+              aria-label="Torna alle chat"
+              title="Torna alle chat"
+            >‹</button>
+          )}
           <Avatar id={dmOtherId || selected.id} name={chatHeader.title} size={36} />
           <div className="chat-header-text">
             <div className="chat-header-title">{chatHeader.title}</div>
@@ -1018,6 +1041,15 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
               ) : chatHeader.sub}
             </div>
           </div>
+          {onOpenConsole && (
+            <button
+              type="button"
+              className="mobile-console-btn"
+              onClick={(e) => { e.stopPropagation(); onOpenConsole(); }}
+              aria-label="Apri console amministratore"
+              title="Mozioni e azioni"
+            >📋</button>
+          )}
         </div>
       )}
       <div className="chat-messages" ref={scrollRef}>
@@ -1092,7 +1124,7 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView,
   );
 }
 
-function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions }) {
+function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions, onMobileBack }) {
   const [motionTitle, setMotionTitle] = useState('');
   const [motionDesc, setMotionDesc] = useState('');
   const [status, setStatus] = useState('');
@@ -1140,6 +1172,18 @@ function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions }) {
 
   return (
     <div className="console">
+      {onMobileBack && (
+        <div className="console-mobile-bar">
+          <button
+            type="button"
+            className="mobile-back"
+            onClick={onMobileBack}
+            aria-label="Indietro"
+            title="Indietro"
+          >‹</button>
+          <span className="console-mobile-title">Console amministratore</span>
+        </div>
+      )}
       {/* Motions */}
       <div className="console-section">
         <h2>Mozioni {openMotions.length > 0 && <span className="badge">{openMotions.length} aperte</span>}</h2>
@@ -1309,6 +1353,10 @@ export default function App() {
   const [nextAdvanceAt, setNextAdvanceAt] = useState(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [paused, setPaused] = useState(false);
+  // Active "view" on mobile (≤768px). On desktop the CSS ignores this and
+  // shows all three columns. On mobile we only render one at a time and
+  // use back/console buttons in ChatColumn + AdminConsole to navigate.
+  const [mobileView, setMobileView] = useState('chats');
 
   // pausedRef lets SSE handlers (registered in a useEffect closure) read the
   // current paused state without re-subscribing every time it changes.
@@ -1429,6 +1477,7 @@ export default function App() {
   const handleSelectChat = useCallback((chatId) => {
     setSelectedChatId(chatId);
     setPendingDmRecipient(null);
+    setMobileView('messages');
     setUnreadByChat(prev => {
       if (!prev[chatId]) return prev;
       const next = { ...prev };
@@ -1449,6 +1498,7 @@ export default function App() {
     } else {
       setSelectedChatId(null);
       setPendingDmRecipient(residentId);
+      setMobileView('messages');
     }
   }, [state, handleSelectChat]);
 
@@ -1851,7 +1901,7 @@ export default function App() {
         </div>
       </div>
       {dayStatus && <div className="day-status-bar">{dayStatus}</div>}
-      <div className="main">
+      <div className="main" data-mobile-view={mobileView}>
         <LeftPanel
           state={state}
           selectedChatId={selectedChatId}
@@ -1861,6 +1911,7 @@ export default function App() {
           typingByChat={typingByChat}
           godView={godView}
           onOpenProfile={setProfileAgentId}
+          onOpenConsole={() => setMobileView('admin')}
         />
         <ChatColumn
           state={state}
@@ -1872,12 +1923,17 @@ export default function App() {
           onSendAnnounce={onSendAnnounce}
           onSendDm={onSendDm}
           onOpenProfile={setProfileAgentId}
+          onMobileBack={() => setMobileView('chats')}
+          onOpenConsole={() => setMobileView('admin')}
         />
         <AdminConsole
           state={state}
           onFileMotion={onFileMotion}
           onCloseMotion={onCloseMotion}
           suggestions={suggestions}
+          onMobileBack={() =>
+            setMobileView(selectedChatId ? 'messages' : 'chats')
+          }
         />
       </div>
       {showHelp && <HelpModal onClose={dismissHelp} />}

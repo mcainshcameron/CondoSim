@@ -38,7 +38,7 @@ from .logging_utils import log, log_error, tail_logs
 from .models import Message, Motion, RunState
 from .building import build_run_state
 from .scheduler import active_loop, advance_to_next_day, day_end_minutes, day_start_minutes, run_day, setup_day
-from .storage import list_runs, load_run, save_run, state_lock
+from .storage import load_run, save_run, state_lock
 
 
 # ---------------------------------------------------------------------------
@@ -267,11 +267,6 @@ async def api_login(request: Request, response: Response, payload: LoginPayload)
 async def api_logout(response: Response):
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"ok": True}
-
-
-@app.get("/api/runs")
-async def api_list_runs():
-    return {"runs": await list_runs()}
 
 
 class CreateRunPayload(BaseModel):

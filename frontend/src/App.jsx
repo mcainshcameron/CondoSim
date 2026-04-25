@@ -93,12 +93,9 @@ function Avatar({ id, name, size = 36, title }) {
 function Setup({ onCreated }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [existing, setExisting] = useState([]);
   const [openingText, setOpeningText] = useState('');
-  const [showRuns, setShowRuns] = useState(false);
 
   useEffect(() => {
-    api.listRuns().then(r => setExisting(r.runs || [])).catch(() => {});
     api.defaultOpening().then(d => setOpeningText(d.text || '')).catch(() => {});
   }, []);
 
@@ -106,18 +103,6 @@ function Setup({ onCreated }) {
     setLoading(true); setError('');
     try {
       const state = await api.createRun(openingText);
-      onCreated(state);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLoad = async (id) => {
-    setLoading(true); setError('');
-    try {
-      const state = await api.getRun(id);
       onCreated(state);
     } catch (e) {
       setError(String(e));
@@ -245,30 +230,6 @@ function Setup({ onCreated }) {
             >
               {loading ? 'Un momento…' : 'Avvia partita ▶'}
             </button>
-
-            {existing.length > 0 && (
-              <div className="setup-runs">
-                <button className="setup-runs-toggle" onClick={() => setShowRuns(v => !v)}>
-                  {showRuns ? '▾' : '▸'} Riprendi una partita ({existing.length})
-                </button>
-                {showRuns && (
-                  <div className="setup-runs-list">
-                    {existing.map(id => (
-                      <button
-                        key={id}
-                        className="setup-run-card"
-                        onClick={() => handleLoad(id)}
-                        disabled={loading}
-                      >
-                        <span className="setup-run-icon">📂</span>
-                        <span className="setup-run-id">{id}</span>
-                        <span className="setup-run-arrow">→</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
 
             {error && <div className="setup-error">{error}</div>}
           </div>

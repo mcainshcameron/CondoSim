@@ -57,9 +57,3 @@ async def load_run(run_id: str) -> RunState | None:
     return RunState.model_validate_json(row["state"])
 
 
-async def list_runs() -> list[str]:
-    async with pool().acquire() as conn:
-        rows = await conn.fetch(
-            "select run_id from runs order by updated_at desc"
-        )
-    return [r["run_id"] for r in rows]

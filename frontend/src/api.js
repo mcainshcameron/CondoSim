@@ -27,7 +27,6 @@ export const api = {
     body: JSON.stringify({ password }),
   }),
   logout: () => req('/api/logout', { method: 'POST' }),
-  listRuns: () => req('/api/runs'),
   createRun: (opening_text) => req('/api/runs', {
     method: 'POST',
     body: JSON.stringify({ opening_text: opening_text ?? null }),

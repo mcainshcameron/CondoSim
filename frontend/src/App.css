@@ -21,6 +21,12 @@
 
 * { box-sizing: border-box; }
 
+/* Global mobile polish — harmless on desktop:
+   - Tap highlight uses brand teal instead of the default iOS blue.
+   - overflow-x: hidden on body prevents accidental sideways scroll
+     when an avatar or bubble is one pixel too wide on narrow phones. */
+* { -webkit-tap-highlight-color: rgba(0, 128, 105, 0.18); }
+
 html, body, #root {
   margin: 0;
   padding: 0;
@@ -28,6 +34,7 @@ html, body, #root {
   background: var(--bg);
   color: var(--text);
 }
+body { overflow-x: hidden; }
 
 button {
   font: inherit;
@@ -2004,6 +2011,53 @@ button {
   .console textarea, .console select, .console input {
     font-size: 16px; /* prevent iOS zoom */
   }
+  /* Console is the bottom-most element on its mobile view (no
+     composer below it), so it has to clear the home indicator
+     itself. */
+  .console { padding-bottom: env(safe-area-inset-bottom, 0); }
+
+  /* --- Long-content safety on small bubbles ------------------- */
+  /* Italian neighbour names + URLs occasionally exceed the bubble
+     width; let them break inside the word rather than push the row
+     past max-width. */
+  .msg .content { overflow-wrap: anywhere; word-break: break-word; }
+
+  /* --- Native-feeling scroll on iOS --------------------------- */
+  /* `overscroll-behavior: contain` stops Safari's pull-to-refresh
+     from firing when the user reaches the top of the chat list or
+     messages — that gesture is a real footgun for chat-style apps. */
+  .panel,
+  .chat-messages,
+  .console,
+  .modal {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  /* --- Bigger tap targets on icon-only controls --------------- */
+  /* Apple HIG says 44x44; we keep desktop visuals untouched and
+     just fatten the hit-areas on phones where fingers (not
+     mice) drive interaction. */
+  .help-btn { width: 36px; height: 36px; font-size: 16px; }
+  .modal-close {
+    width: 44px;
+    height: 44px;
+    font-size: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin: -10px -10px -10px 0; /* pull the bigger hit area back into the header */
+  }
+  .resident-chat-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: -8px; /* re-align with desktop visual position */
+  }
+  .speed-btn { padding: 10px; min-height: 40px; }
 }
 
 /* Very small phones: trim further so the topbar still fits. */

@@ -1285,11 +1285,11 @@ function HelpModal({ onClose }) {
         </div>
 
         <div className="modal-section help-section">
-          <h3>I tre pannelli</h3>
+          <h3>Cosa hai a disposizione</h3>
           <ul className="help-list">
-            <li><strong>Sinistra</strong> — Chat, residenti e alleanze. Clicca una chat per aprirla, o un residente per vederne il profilo.</li>
-            <li><strong>Centro</strong> — La conversazione attiva. Scrivi in basso per inviare un avviso al gruppo o un DM privato.</li>
-            <li><strong>Destra</strong> — Console amministratore: mozioni e azioni rapide.</li>
+            <li><strong>Chat</strong> — La lista delle conversazioni e dei residenti. Tocca una chat per aprirla, o un residente per vederne il profilo.</li>
+            <li><strong>Conversazione</strong> — Lo scambio attivo. Scrivi in basso per inviare un avviso al gruppo o un DM privato. Da telefono, la freccia ‹ in alto a sinistra ti riporta alla lista.</li>
+            <li><strong>Console amministratore</strong> — Mozioni e azioni rapide. Da telefono raggiungila col bottone 📋 nell'intestazione della chat (o dal banner verde sopra la lista).</li>
           </ul>
         </div>
 

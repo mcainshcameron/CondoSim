@@ -9,6 +9,7 @@ dist/
 .vite/
 .DS_Store
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Local Supabase credentials — NEVER commit
 /supabase
@@ -16,3 +17,11 @@ supabase_info.txt
 
 # Heroku build artifacts
 frontend/dist/
+
+# Local audit / scratch dumps. Contains real friend-test transcripts and
+# admin_goal strings — never commit.
+data/_audit/
+
+# Smoketest output (run_smoketest.py)
+data/smoketest_*.log
+data/smoketest_*.md

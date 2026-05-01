@@ -112,6 +112,21 @@ def _weekday_italian(state: RunState, day: int) -> str:
     return _WEEKDAYS_IT[dt.weekday()]
 
 
+def _visible_message_count_today(state: RunState, agent: Agent, day: int) -> int:
+    """How many messages this agent saw on `day` (sent or received).
+
+    Used as the silent-day guard before consolidation: when this is too low,
+    asking the model to write a diary entry produces fabricated events
+    rather than an honest "nothing happened". The fix is to not call the
+    model in the first place, not to filter the result.
+    """
+    aid = agent.persona.id
+    return sum(
+        1 for m in state.messages
+        if m.day == day and (aid in m.audience or m.sender_id == aid)
+    )
+
+
 def _today_transcript(state: RunState, agent: Agent, day: int) -> str:
     """Return the day's chat content visible to this agent, in time order."""
     aid = agent.persona.id
@@ -181,12 +196,45 @@ def _consolidation_prompt(
     )
 
 
+SILENT_DAY_THRESHOLD = 2  # below this many visible messages, skip the LLM call
+
+
 async def _consolidate_one(
     state: RunState,
     agent: Agent,
     day: int,
 ) -> None:
     aid = agent.persona.id
+
+    # Silent-day guard: with too little input, the model cannot honestly
+    # write "nothing happened" — it fills the slot with invented events
+    # (a phone call from the geometra, a cellar mold problem, a new tenant
+    # nobody mentioned). Once that fiction lands in MEMORY it bleeds into
+    # every subsequent activation. Cheaper and more honest: append a fixed
+    # marker and skip the call entirely.
+    visible = _visible_message_count_today(state, agent, day)
+    if visible < SILENT_DAY_THRESHOLD:
+        weekday = _weekday_italian(state, day)
+        addition = (
+            f"\n\n--- Giorno {day}, {weekday} ---\n"
+            f"Giornata silenziosa, niente da segnare.\n"
+        )
+        async with pool().acquire() as conn:
+            await conn.execute(
+                """
+                update agent_memory
+                   set content = rtrim(content, E' \\t\\n\\r') || $3,
+                       updated_at = now()
+                 where run_id = $1 and agent_id = $2
+                """,
+                state.run_id,
+                aid,
+                addition,
+            )
+        log("memory", f"{aid} day{day} silent (visible={visible}), skipped LLM consolidation")
+        agent.notes = []
+        return
+
     soul = read_soul(state, aid)
     memory_so_far = await read_memory(state, aid)
     transcript = _today_transcript(state, agent, day)

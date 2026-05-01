@@ -298,18 +298,34 @@ def _thread_status(ctx: ToolContext, agent: Agent) -> str:
         if not own_idx:
             continue  # haven't spoken here yet, nothing to remind about
         last_own = msgs[own_idx[-1]]
+        own_count = len(own_idx)
         after = msgs[own_idx[-1] + 1:]
 
         when_own = _fmt_when(last_own.day, current_day, last_own.fictional_timestamp_minutes)
+        # Italian plural: "1 cosa" vs "N cose"
+        own_word = "cosa" if own_count == 1 else "cose"
 
+        # Deliberately do NOT show the agent's own message verbatim. Echoing
+        # their last sentence back into the prompt makes that token sequence
+        # the most salient continuation — the model rewords it and posts a
+        # near-duplicate. A count + timestamp gives the same self-awareness
+        # ("I've been speaking here, last X hours ago") without the priming.
+        # If the agent needs to refresh what they actually said, read_chat
+        # is one tool call away.
         if chat.kind == "dm":
             other_id = next((mid for mid in chat.member_ids if mid != aid), "?")
             other_name = name_by_id.get(other_id, other_id)
-            header = f"- DM con {other_name} — tua ultima cosa {when_own}:"
+            header = (
+                f"- DM con {other_name} — qui hai già scritto {own_count} "
+                f"{own_word} (ultima {when_own})."
+            )
         else:
-            header = f"- Gruppo \"{chat.display_name}\" — tua ultima cosa {when_own}:"
+            header = (
+                f"- Gruppo \"{chat.display_name}\" — qui hai già scritto {own_count} "
+                f"{own_word} (ultima {when_own})."
+            )
 
-        lines = [header, f"    tu: \"{trim(last_own.content)}\""]
+        lines = [header]
 
         if chat.kind == "dm":
             partner_replies = [m for m in after if m.sender_id != aid]
@@ -317,11 +333,11 @@ def _thread_status(ctx: ToolContext, agent: Agent) -> str:
                 r = partner_replies[-1]
                 when_r = _fmt_when(r.day, current_day, r.fictional_timestamp_minutes)
                 lines.append(
-                    f"    {name_by_id.get(r.sender_id, r.sender_id)} ha risposto {when_r}: "
+                    f"    {name_by_id.get(r.sender_id, r.sender_id)} ti ha risposto {when_r}: "
                     f"\"{trim(r.content)}\""
                 )
             else:
-                lines.append("    Non ha ancora risposto — non riscrivere, aspetta.")
+                lines.append("    Non ti ha ancora risposto — non riscrivere, aspetta.")
         else:
             others_today = [m for m in after if m.sender_id != aid and m.day == current_day]
             if others_today:
@@ -339,8 +355,10 @@ def _thread_status(ctx: ToolContext, agent: Agent) -> str:
     if not all_blocks:
         return ""
     return (
-        "I tuoi fili aperti (quello che hai già detto e chi ha risposto — "
-        "non ripeterti, non riconfermare cose già confermate, non riformulare):\n"
+        "I tuoi fili aperti — dove hai già parlato, chi ti ha risposto, cosa è "
+        "successo dopo. La conversazione si muove in avanti: non rifare le stesse "
+        "domande, non riformulare cose già dette. Se vuoi rivedere quello che hai "
+        "scritto, apri la chat dal telefono.\n"
         + "\n".join(all_blocks)
     )
 

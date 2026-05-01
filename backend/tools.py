@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from . import dials
 from .events import bus
-from .models import Chat, Message, RunState
+from .models import Chat, Message, Motion, RunState
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,18 @@ FORBIDDEN_TERMS = [
     r"\bnon posso fingere\b", r"\bnon mi sento a mio agio\b",
 ]
 FORBIDDEN_RE = re.compile("|".join(FORBIDDEN_TERMS), re.IGNORECASE)
+
+
+# Reactions are constrained at the schema boundary (enum) and re-checked at
+# runtime as defence-in-depth for providers that don't enforce enums. Without
+# this, models echo whatever broken-codepoint sequences appear in chat history
+# (zero-width-joiner artifacts, mojibake from upstream rendering, halfwidth
+# katakana). The list is intentionally short: a reaction reads as a social
+# signal, not a vocabulary.
+ALLOWED_REACTION_EMOJI = (
+    "👍", "❤️", "😂", "😮", "😢", "😡", "🔥", "🙄", "💯", "🙏", "👀",
+)
+ALLOWED_REACTION_SET = frozenset(ALLOWED_REACTION_EMOJI)
 
 
 def contains_forbidden(text: str) -> str | None:
@@ -252,16 +264,21 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "react_to_message",
             "description": (
-                "Reagisci a un messaggio recente con un singolo emoji (👍 ❤️ 😂 😮 😢 😡 🔥 🙄 ecc.). "
-                "Non conta come messaggio pieno — serve quando vuoi far sapere che hai letto o cosa "
-                "pensi senza scrivere una risposta. Messaggio identificato dalle prime parole."
+                "Reagisci a un messaggio recente con una delle reazioni permesse "
+                "(👍 ❤️ 😂 😮 😢 😡 🔥 🙄 💯 🙏 👀). Non conta come messaggio pieno: "
+                "serve per dire \"ho letto\" o \"sono d'accordo\" senza scrivere. "
+                "Identifica il messaggio dalle sue prime 5-10 parole."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "chat": {"type": "string", "description": "Nome della chat"},
                     "message_excerpt": {"type": "string", "description": "Le prime 5-10 parole del messaggio a cui vuoi reagire"},
-                    "emoji": {"type": "string", "description": "Un singolo emoji (es. 👍, ❤️, 😡)"},
+                    "emoji": {
+                        "type": "string",
+                        "enum": list(ALLOWED_REACTION_EMOJI),
+                        "description": "Reazione: una tra 👍 ❤️ 😂 😮 😢 😡 🔥 🙄 💯 🙏 👀.",
+                    },
                 },
                 "required": ["chat", "message_excerpt", "emoji"],
             },
@@ -754,7 +771,6 @@ def tool_write_note(ctx: ToolContext, text: str) -> str:
 
 
 def tool_propose_motion(ctx: ToolContext, title: str, description: str) -> str:
-    from .models import Motion
     state = ctx.state
     title = (title or "").strip()
     description = (description or "").strip()
@@ -785,8 +801,54 @@ def tool_propose_motion(ctx: ToolContext, title: str, description: str) -> str:
     return f"Mozione depositata (codice {motion.id}). È stata annunciata nel gruppo."
 
 
+def _close_motion_if_ready(ctx: ToolContext, motion: Motion) -> None:
+    """Auto-close a motion once a clear majority of residents has been reached.
+
+    Strict majority of all residents passes/fails. If everyone has cast a vote
+    but neither side has a strict majority (e.g., 2-2-1), the larger camp wins
+    and ties resolve as failed. The closure is announced in the main chat as
+    an admin-authored bookkeeping line so agents see it and can react.
+    """
+    if motion.status != "open":
+        return
+    state = ctx.state
+    total = len(state.agents)
+    if total == 0:
+        return
+    yes_count = sum(1 for v in motion.votes.values() if v == "yes")
+    no_count = sum(1 for v in motion.votes.values() if v == "no")
+    abst_count = sum(1 for v in motion.votes.values() if v == "abstain")
+    cast = len(motion.votes)
+    threshold = total // 2 + 1
+
+    outcome: str | None = None
+    if yes_count >= threshold:
+        outcome = "passed"
+    elif no_count >= threshold:
+        outcome = "failed"
+    elif cast >= total:
+        outcome = "passed" if yes_count > no_count else "failed"
+
+    if outcome is None:
+        return
+
+    motion.status = outcome  # type: ignore[assignment]
+    motion.closed_at_fictional_min = ctx.current_fictional_minutes
+    motion.outcome_note = f"{yes_count} sì, {no_count} no, {abst_count} astenuti"
+
+    main_chat = _chat_by_id(state, "main")
+    if main_chat is not None:
+        verdict = "approvata" if outcome == "passed" else "respinta"
+        body = (
+            f"📋 [Esito mozione] \"{motion.title}\" — {verdict}. "
+            f"({motion.outcome_note})"
+        )
+        _create_and_append_message(ctx, main_chat, "admin", body)
+
+    bus().publish(state.run_id, "motion_closed", {"motion": motion.model_dump()})
+
+
 def tool_vote(ctx: ToolContext, motion_id: str, choice: str) -> str:
-    from .events import bus
     state = ctx.state
     # Accept either the codice or a substring of the title
     motion = next((m for m in state.motions if m.id == motion_id), None)
@@ -808,6 +870,14 @@ def tool_vote(ctx: ToolContext, motion_id: str, choice: str) -> str:
         "choice": choice,
     })
     label = {"yes": "sì", "no": "no", "abstain": "astenuto"}[choice]
+
+    _close_motion_if_ready(ctx, motion)
+    if motion.status != "open":
+        verdict = "approvata" if motion.status == "passed" else "respinta"
+        return (
+            f"Voto registrato: {label} sulla mozione \"{motion.title}\". "
+            f"Con il tuo voto la mozione si è chiusa: {verdict} ({motion.outcome_note})."
+        )
     return f"Voto registrato: {label} sulla mozione \"{motion.title}\"."
 
 
@@ -960,8 +1030,8 @@ def tool_react_to_message(ctx: ToolContext, chat: str, message_excerpt: str, emo
     if msg is None:
         return "Non trovo il messaggio a cui vuoi reagire."
     emoji = (emoji or "").strip()
-    if not emoji or len(emoji) > 6:
-        return "Usa un singolo emoji (es. 👍, ❤️, 😡)."
+    if emoji not in ALLOWED_REACTION_SET:
+        return f"Usa una di queste reazioni: {' '.join(ALLOWED_REACTION_EMOJI)}."
     # Add reaction, avoiding duplicate reactions from same agent
     bucket = msg.reactions.setdefault(emoji, [])
     if ctx.agent_id not in bucket:

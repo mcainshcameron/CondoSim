@@ -8,7 +8,7 @@ Condominio (CondoSim) — a multi-agent deception probe disguised as a condomini
 administration game. A FastAPI backend runs 5 LLM "resident" agents (via
 OpenRouter) who chat inside a WhatsApp-style Italian condo. A React/Vite
 frontend is the admin console. The full implementation status and design
-rationale live in `IMPLEMENTATION.md` — read it first for architectural
+rationale live in `docs/IMPLEMENTATION.md` — read it first for architectural
 context, especially §2 (architecture), §3 (SOUL/MEMORY), §4 (design
 decisions). `README.md` is also kept current; `old/game_design.md` is stale
 and should not be treated as authoritative.
@@ -35,7 +35,7 @@ python scripts/run_smoketest.py     # edit TOTAL_DAYS inside the script
 python -m backend.analyze data/runs/<run_id>.json --out report.md
 ```
 
-There is **no pytest suite** (noted as a known gap in IMPLEMENTATION.md §6.10).
+There is **no pytest suite** (noted as a known gap in docs/IMPLEMENTATION.md §6.10).
 `scripts/run_smoketest.py` is the regression check — it's slow and costs API credits.
 
 Required env (see `.env.example` for the full list):
@@ -218,7 +218,7 @@ MEMORY, not injected narration).
 
 ## Known gaps worth knowing before changing things
 
-See IMPLEMENTATION.md §6 for the full list. Highlights:
+See docs/IMPLEMENTATION.md §6 for the full list. Highlights:
 
 - No unit tests — smoketest + `analyze.py` canaries are the only safety net.
 - Message volume is prompt-sensitive (±3× for small wording changes) —

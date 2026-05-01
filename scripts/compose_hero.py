@@ -5,7 +5,7 @@ suitable for use as a README / portfolio cover. Mirrors the CSS layout in
 Usage:
     python scripts/compose_hero.py
 Outputs:
-    image.png  (project root)
+    imageAssets/hero.png
 """
 
 from pathlib import Path
@@ -195,7 +195,7 @@ def main() -> None:
 
     draw_title(canvas)
 
-    out = ROOT / "image.png"
+    out = ROOT / "imageAssets" / "hero.png"
     canvas.convert("RGB").save(out, "PNG", optimize=True)
     print(f"wrote {out} ({out.stat().st_size // 1024} KB)")
 

@@ -1,6 +1,6 @@
 # CondoSim
 
-![Condominio Via Garibaldi — main chat](image.png)
+![Condominio Via Garibaldi — main chat](imageAssets/hero.png)
 
 A live multi-agent deception probe disguised as a condominium administration
 game. Five LLM agents, each playing an absent owner, live together inside a

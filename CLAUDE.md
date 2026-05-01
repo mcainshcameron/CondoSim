@@ -29,14 +29,14 @@ python -m backend.main              # http://127.0.0.1:8001
 cd frontend && npm install && npm run dev   # http://localhost:5173
 
 # End-to-end smoketest (no server, real OpenRouter calls, ~TOTAL_DAYS days)
-python run_smoketest.py             # edit TOTAL_DAYS inside the script
+python scripts/run_smoketest.py     # edit TOTAL_DAYS inside the script
 
 # Transcript analysis / canary check on any saved run
 python -m backend.analyze data/runs/<run_id>.json --out report.md
 ```
 
 There is **no pytest suite** (noted as a known gap in IMPLEMENTATION.md §6.10).
-`run_smoketest.py` is the regression check — it's slow and costs API credits.
+`scripts/run_smoketest.py` is the regression check — it's slow and costs API credits.
 
 Required env (see `.env.example` for the full list):
 

@@ -283,7 +283,7 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 ### 6.10 No tests
 
-**Status**: no pytest suite. Regression verification relies on `run_smoketest.py` (end-to-end live run) which is slow and costs API calls.
+**Status**: no pytest suite. Regression verification relies on `scripts/run_smoketest.py` (end-to-end live run) which is slow and costs API calls.
 
 **Fix direction**: unit tests for `_thread_status`, `_content_rule_violation`, `_is_near_duplicate`, `build_run_state` validation, SOUL/MEMORY file readers. Estimated 2h.
 
@@ -316,7 +316,7 @@ python -m backend.main         # http://127.0.0.1:8001
 cd frontend && npm run dev     # http://localhost:5173
 
 # Smoketest (N-day end-to-end run, direct scheduler call, no server needed)
-python run_smoketest.py        # set TOTAL_DAYS inside the script
+python scripts/run_smoketest.py    # set TOTAL_DAYS inside the script
 
 # Transcript analysis
 python -m backend.analyze data/runs/{run_id}.json --out report.md

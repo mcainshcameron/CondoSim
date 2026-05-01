@@ -16,6 +16,10 @@ from uuid import uuid4
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
+# Lives in scripts/, but imports the in-tree backend package — make the
+# project root importable when invoked as `python scripts/run_smoketest.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from backend import memory as mem
 from backend.analyze import first_day_temperature
 from backend.building import build_run_state

@@ -20,7 +20,7 @@ Drama emerges from **flawed character SOULs** + **accumulated MEMORY** + **whate
 backend/
   main.py           # FastAPI app: run CRUD, advance-day, admin actions, SSE, auth, rate limits, static SPA mount
   building.py       # Generic building loader: load_building(id), build_run_state
-  scheduler.py      # DayLoop: engagement rolls → priority queue → parallel activations
+  scheduler.py      # DayLoop: serial round-robin (ROUNDS_PER_DAY=4) with per-turn participation roll
   agent.py          # build_system_prompt (async), build_notification_prompt, activate_agent
   memory.py         # read_soul (file) / read_memory, initialize_run_memory, consolidate_day — Postgres
   tools.py          # send_message, send_dm, react_to_message, file_motion, + 8 others
@@ -105,9 +105,34 @@ At each `day_end` (scheduler):
 3. Per-agent parallel LLM call to produce the diary entry → appended to `data/runs/{run_id}/memory/{agent_id}.md`
 4. Clear each agent's intra-day `notes` list
 
-### 3.5 Engagement scheduler
+### 3.5 Round-robin scheduler
 
-Event-driven with probabilistic engagement rolls, not turn-based. Each new message triggers an audience-wide roll. Engagement probability = `responsiveness_base × (1 + admin_boost) × (1 + mention_boost) × (soft_budget_penalty) × (saturation_damper)`. Engaged agents enter a fictional-time priority queue; activations run in parallel batches within a 60-minute fictional window.
+Serial, not parallel. Each fictional day is split into `ROUNDS_PER_DAY=4` even windows across `[DAY_START_HOUR, DAY_END_HOUR]`. Within every round each agent takes one turn in a seeded random order (`run_id × day × round_idx` → reproducible) and rolls a participation probability:
+
+```
+participation_probability(persona)
+  × time_of_day_window           # 0.4× outside agent's preferred hours
+  × mention_boost                # ≥0.95 if surname appeared in last ~3h
+  × admin_announce_boost         # +0.15 after a fresh admin main-chat post
+  × saturation_damper            # 0.5× if 2 sent today in main, 0.2× if 3+
+  × budget_damper                # 0.3× past PER_AGENT_DAILY_SOFT_BUDGET
+  × admin_ping_damper            # 0.2× if a peer is pinging silent admin
+  × quiet_morning_gate           # 0.1× on round 0 if day>1 and quiet prior day
+```
+
+On a hit the agent activates and sees the FULL up-to-date state every prior agent in the round just produced. On a miss the scheduler publishes `agent_skipped_turn` and continues.
+
+`Persona.participation_probability` is an optional 0..1 override per resident; when unset the baseline derives from `responsiveness` (fast=0.85, medium=0.65, slow=0.35).
+
+**Mid-day admin actions** (announce / DM / motion) call `DayLoop.schedule_reactions(msg, force=True)` from `main.py`. The audience is added to `pending_admin_reactions`; those agents bypass the participation roll on their next turn. Pending admin DMs (recipient hasn't replied yet) bypass the roll automatically.
+
+**Acknowledgment guarantee** — admin messages are not silently ignored:
+
+1. *Causality clamp* — a forced agent's `target` fictional minute is pushed past the latest non-resident message in their audience so the message is visible via `read_inbox` (which filters by `fictional_timestamp_minutes <= now`).
+2. *Ack detector* — `ToolContext.reactions_added_this_activation` and `sent_messages_this_activation` together define an acknowledgment. A forced agent that closes the phone with neither stays in `pending_admin_reactions` and is retried in the bonus drain (max 2 rounds; on exhaustion a `WARNING` is logged and the set cleared so the day can end).
+3. *Prompt nudge* — `build_notification_prompt` accepts a `forced_for_admin` flag and adds a one-line cue ("L'amministratore ha scritto e tu non hai ancora reagito... non chiudere il telefono senza dire niente").
+
+Why serial: parallel activation against the same snapshot was the cause of the v1 near-duplicate problem — agents B/C/D would each independently produce "ma cosa succede?" / "qualcuno spieghi" / "che cosa sta succedendo?". v1 caught these post-hoc with a regex; round-robin removes the cause (B sees what A just said before B acts).
 
 ---
 
@@ -135,9 +160,11 @@ The old system prompt had ~20 behavioral rules ("tono cresce con gli eventi", "n
 
 The end-of-day diary is written BY THE AGENT with an LLM call, not extracted by a script. Subjective, lossy, biased — which is the point. A narcissist's memory of day 1 differs from a pragmatist's memory of the same day.
 
-### 4.6 Block-and-bail ONLY on near-duplicate
+### 4.6 Block-and-bail ONLY on world-rule violations
 
-When the dedup filter catches a near-identical resend, `ctx.done = True` ends the activation — preventing the "tack on a different tail to slip past the filter" workaround. Consecutive-DM and daily-cap blocks just refuse the send; the agent can still do other things.
+When `_content_rule_violation` catches a forbidden phrase (in-person meetings, "chat sparita" / phone-fiction excuses), `ctx.done = True` ends the activation — preventing the "tack on a different tail to slip past the filter" workaround. DM cooldown refusals just refuse the send; the agent can still do other things.
+
+Near-duplicate fingerprint detection has been **removed** in the round-robin shift (§3.5): the schedule prevents the parallel-activation race that produced near-dupes, so the post-hoc regex is no longer load-bearing.
 
 ### 4.7 Auto-advance chains on `day_done` SSE, not on the POST response
 
@@ -161,7 +188,8 @@ Frontend rule: `onAdvance` only kicks off the work (`api.advanceDay(id)` → 202
 | Emoji reactions as first-class engagement option | ✓ (agents using them: 14 reactions / 3 days in latest run) |
 | Anti-hallucination prompt line + phrase filter | ✓ 0 "chat sparita" across recent runs |
 | No-physical-meetings rule + phrase filter | ✓ 0 meeting proposals in recent runs |
-| Block-and-bail on near-duplicate send | ✓ |
+| Round-robin scheduler with participation rolls | ✓ verified end-to-end (10-day smoketest, 0 leaks, 0 errors) |
+| Acknowledgment guarantee for forced admin reactions | ✓ retry path observed firing successfully on day-4 admin follow-up |
 | Admin goal injection (system + notification) | ✓ via `PUT /api/runs/{id}/agents/{aid}/goal` |
 | Motion filing/voting/closing | ✓ tool + API + trust update on close |
 | Day-end race fix (save before SSE publish) | ✓ |
@@ -259,7 +287,7 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 ### 6.6 Trust scalar no longer verbalized
 
-**Status**: by design during the SOUL/MEMORY refactor, I stopped injecting trust-scalar narration into the system prompt ("Con X vai d'accordo da tempo"). Relationships now live in MEMORY.md — and the matrix now populates from multiple signals (see 6.1). The scalar is used for **scheduler engagement dampers** and displayed in the UI alleanza panel, but not fed into the agent prompt.
+**Status**: by design during the SOUL/MEMORY refactor, I stopped injecting trust-scalar narration into the system prompt ("Con X vai d'accordo da tempo"). Relationships now live in MEMORY.md — and the matrix now populates from multiple signals (see 6.1). The scalar is displayed in the UI alleanza panel and emits a `trust_updated` SSE on every change, but is **not** fed back into the agent prompt or the scheduler's participation roll.
 
 **Option (not currently needed)**: re-expose strong trust signals in the prompt once the matrix has meaningful values (e.g. `|score| >= 0.3`). Deferred until we see whether MEMORY-carried relationships alone produce good enough coherence. The matrix is now observable (panel populates), so this is easy to evaluate.
 
@@ -285,7 +313,7 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 **Status**: no pytest suite. Regression verification relies on `scripts/run_smoketest.py` (end-to-end live run) which is slow and costs API calls.
 
-**Fix direction**: unit tests for `_thread_status`, `_content_rule_violation`, `_is_near_duplicate`, `build_run_state` validation, SOUL/MEMORY file readers. Estimated 2h.
+**Fix direction**: unit tests for `_thread_status`, `_content_rule_violation`, `_participation_probability` modifiers, `build_run_state` validation, SOUL/MEMORY file readers, scheduler causality clamp + ack guarantee. Estimated 2-3h.
 
 ---
 

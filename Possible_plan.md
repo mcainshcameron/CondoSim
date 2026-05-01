@@ -13,6 +13,16 @@
 >   Half this document is about what makes the simulation *feel alive*, not
 >   what makes it operationally clean.
 
+> **Phase 2 status (shipped):** the round-robin scheduler from §4 is now
+> on `main` (commit `03661a2`). Serial activation, participation rolls
+> with v1's modifiers preserved, near-duplicate fingerprint deleted,
+> causality clamp + acknowledgment guarantee added, `participation_probability`
+> override on `Persona`. Verified by two 10-day OpenRouter smoketests:
+> 0 leaks, 0 errors, day-1 canary PASS, all forced admin reactions
+> acknowledged. The remaining phases (event log, structured outputs,
+> open-ended runs, frontend rewrite, realism additions) are not yet
+> started.
+
 ---
 
 ## 1. Context — what this plan is solving
@@ -622,43 +632,79 @@ Supabase free tier handles it. Cleaned up in Phase 5.
 
 ---
 
-### Phase 2 — Round-robin day loop (1 week)
+### Phase 2 — Round-robin day loop ✅ SHIPPED (commit `03661a2`)
 
 **Goal:** Replace v1's engagement-roll batch parallelism with serial
 round-robin + participation rolls. Delete near-duplicate fingerprinting.
 
-**Deliverables:**
-- `domain/turn_order.py` — pure: random shuffle per round, participation
-  roll, fictional-minute tick allocation.
-- `engine/day_loop.py` — the serial coroutine with participation rolls
-  and end-condition checks (end conditions stub for now; full version in
-  Phase 4).
-- Schema migration `003_residents_participation.sql` — add
-  `participation_probability`, backfill from existing `responsiveness`
-  enum (fast=0.85, medium=0.65, slow=0.35). Update `residents.json` schema
-  in `data/buildings/001/`.
-- Replace `backend/main.py:advance_day` body to call the new `run_day`.
-  Keep the 202 + `asyncio.create_task` pattern.
-- **Delete**: `backend/scheduler.py` engagement rolls, priority queue,
-  batch parallelism, cascade depth. Delete near-duplicate fingerprinting
-  in `backend/tools.py:375-391`.
-- Frontend: remove the v1 "is this a duplicate?" handling if any leaked
-  client-side.
+**What landed (deviations from the original plan in italics):**
 
-**Acceptance criteria:**
-- Run-the-day SQL invariant: no two activations have overlapping
-  `[started_at, ended_at]` windows.
-- Run-the-day SQL invariant: at every activation, the `inbox_snapshot`
-  covers all `chat_messages` for chats the agent participates in with
-  `fictional_minute < activation.fictional_minute`.
-- Participation roll sanity: across 10 rounds, an agent's skip rate is
-  within ±15% of `(1 - participation_probability)`.
-- Smoketest passes (qualitatively: messages feel staggered, not all
-  fired at once; quiet agents skip turns).
-- Containment-vocab canaries still 0 (forbidden-vocab regex still works
-  as defense-in-depth).
-- A new run produces zero `near_duplicate_blocked` events because the
-  detection code is gone — the schedule prevents the cause.
+- *Did not* extract pure `domain/turn_order.py` / `engine/day_loop.py`
+  modules — kept the existing `backend/scheduler.py` shape and rewrote
+  `DayLoop` in-place. Skipped the foundation work in Phases 0/1 (event
+  log, separate domain/engine packages) so this PR could ship as a
+  focused single-phase change. Those modular splits remain on the table.
+- *No schema migration.* Added `Persona.participation_probability` as an
+  optional pydantic field with `None` default and a derive-from-
+  responsiveness fallback in `_baseline_probability`. Existing
+  `residents.json` and the JSONB blob in `runs.state` deserialize without
+  change. `responsiveness` field kept (used by the time-of-day window
+  TIME_OF_DAY_WINDOWS lookup and the participation default). The
+  `responsiveness` enum can be retired in a later cleanup pass.
+- ✓ Round-robin loop with seeded shuffle per round, participation rolls,
+  fictional-minute tick allocation.
+- ✓ Engagement modifiers preserved: mention boost, admin announcement
+  boost, time-of-day window (now a 0.4× damper, not a hard clamp),
+  saturation, soft daily budget, admin-ping damper, day>1 quiet-morning
+  gate.
+- ✓ Mid-day admin actions: `DayLoop.schedule_reactions(force=True)`
+  retained as compatibility shim — adds audience to
+  `pending_admin_reactions`. Forced agents bypass the participation roll.
+  Up to 2 bonus drain rounds after planned rounds.
+- ✓ **Causality clamp added** (not in original plan): a forced agent's
+  target fictional minute is pushed past the latest non-resident message
+  in their audience so they actually see what they're owed to react to.
+  Required because the round window's natural `target` could be earlier
+  than the admin message's timestamp.
+- ✓ **Acknowledgment guarantee added** (not in original plan): a forced
+  agent that closes the phone with no `sent_messages_this_activation` and
+  no `reactions_added_this_activation` stays in `pending_admin_reactions`
+  and gets retried in the bonus drain. `WARNING` + clear if exhausted.
+  `ToolContext` gained `reactions_added_this_activation`, populated by
+  `tool_react_to_message`. `build_notification_prompt` takes a
+  `forced_for_admin` flag and adds a one-line cue.
+- ✓ Deletions: `_is_near_duplicate`, `_intent_of`, `_INTENT_PATTERNS`,
+  `_INTENT_REPEAT_WINDOW_MIN` from `backend/tools.py`. `CASCADE_MAX_DEPTH`
+  from `backend/config.py` (replaced by `ROUNDS_PER_DAY=4`). v1's
+  priority queue / batch parallelism / cascade-depth recursion gone from
+  `scheduler.py`.
+- ✓ Kept the 202 + `asyncio.create_task` pattern in
+  `backend/main.py:_run_day_bg`.
+- ✓ `_tokens` / stopword set retained because `forward_message` /
+  `react_to_message` still use them for fuzzy excerpt matching.
+
+**Acceptance results:**
+
+- ✓ Containment-vocab canaries 0 across two 10-day OpenRouter smoketests.
+- ✓ Day-1 fabricated-history canary PASS in both runs.
+- ✓ 0 errors / 0 OpenRouter failures / 0 unresolved owed agents.
+- ✓ Day-4 admin follow-up: all 5 forced agents activated AT OR AFTER the
+  message timestamp (in v1, 2/5 activated before due to the round-window
+  starting before the admin post). Causality clamp working.
+- ✓ Day-4: 1 agent closed phone silently; the retry path caught it on
+  round 2 and they sent a message. Acknowledgment guarantee working.
+- ✓ Late-game drama held (no "giornata silenziosa" cooldown by day 8 like
+  v1) — agents formed alliances and continued political maneuvering
+  through day 10.
+
+**Deferred to later phases:**
+
+- Pure `domain/`/`engine/` module split (will land if/when Phase 1
+  event-log work is picked up).
+- `responsiveness` enum retirement (waiting on author migration to
+  `participation_probability` overrides if anyone needs them).
+- Frontend "is this a duplicate?" client-side dedup (no such code found
+  in `frontend/src/App.jsx` — was already absent).
 
 ---
 
@@ -929,7 +975,7 @@ prose (the code structure is the invariant).
 |---|---|---|
 | 1 | P0 | Foundation — CI, migrations, skeleton, session pooler |
 | 2 | P1 | Event log, traceability, trace API, SSE replay |
-| 3 | P2 | Round-robin loop + participation rolls; delete scheduler.py |
+| 3 | P2 | Round-robin loop + participation rolls; delete scheduler.py ✅ |
 | 4 | P3 | Structured outputs primary; containment as defense-in-depth |
 | 5 | P4 | Open-ended runs + cost caps + revocation vote |
 | 6-7 | P5 | Frontend rewrite (largest single phase) |

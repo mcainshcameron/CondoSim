@@ -360,10 +360,10 @@ async def _run_day_bg(run_id: str, lock: asyncio.Lock) -> None:
 async def api_advance_day(request: Request, run_id: str):
     """Kick off the next fictional day as a background task and return 202.
 
-    The day itself can take 60–200s (full LLM cascade), which would blow
-    Heroku's 30s HTTP timeout if we awaited it inline. The frontend listens
-    for the `day_done` SSE event to know the day finished and to chain the
-    next advance.
+    A round-robin day with 4 rounds × 5 agents averages 60–250s of
+    serialised LLM work, which would blow Heroku's 30s HTTP timeout if we
+    awaited it inline. The frontend listens for the `day_done` SSE event
+    to know the day finished and to chain the next advance.
     """
     lock = bus().lock(run_id)
     if lock.locked():

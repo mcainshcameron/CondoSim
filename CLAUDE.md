@@ -130,6 +130,26 @@ rounds finish and reactions remain owed, up to two **bonus drain rounds**
 service them before day_end. Pending admin DMs (recipient hasn't replied
 yet) bypass the roll automatically too.
 
+**Acknowledgment guarantee** — admin messages must not be silently
+ignored:
+
+1. *Causality clamp.* A forced agent's `target` fictional minute is
+   pushed past the latest non-resident message in their audience, so
+   they activate after they can actually see what they're owed to react
+   to. (`read_inbox` / `_thread_status` filter by
+   `fictional_timestamp_minutes <= now`.)
+2. *Ack detector.* `ToolContext.reactions_added_this_activation` plus
+   `sent_messages_this_activation` together define an acknowledgment.
+   A forced agent that closes the phone with neither stays in
+   `pending_admin_reactions` and is retried in the bonus drain (max 2
+   rounds; on exhaustion a `WARNING` is logged and the set is cleared
+   so the day can end).
+3. *Prompt nudge.* `build_notification_prompt` takes a
+   `forced_for_admin` flag from the scheduler and adds a one-line cue
+   ("L'amministratore ha scritto e tu non hai ancora reagito... non
+   chiudere il telefono senza dire niente") so the model isn't left
+   guessing what the activation is for.
+
 Why serial: parallel activation against the same snapshot was the cause
 of the v1 near-duplicate problem — agents B, C, D would each independently
 generate "ma cosa succede?" / "qualcuno spieghi" / "che cosa sta

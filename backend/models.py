@@ -51,6 +51,11 @@ class Persona(BaseModel):
     responsiveness: Responsiveness
     time_of_day: TimeOfDay
     millesimi: int
+    # Optional override for the per-round participation roll. None means
+    # "derive from responsiveness" (fast=0.85, medium=0.65, slow=0.35).
+    # Authors can pin a specific number in residents.json when responsiveness
+    # alone is too coarse; otherwise leave unset.
+    participation_probability: float | None = None
 
 
 class OwnerBrief(BaseModel):

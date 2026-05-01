@@ -112,14 +112,38 @@ on `done`, on hitting the cap, or on no tool_calls returned.
 
 ### Scheduler (`backend/scheduler.py`)
 
-Event-driven, not turn-based. Each new message triggers an audience-wide
-engagement roll (`responsiveness_base × admin_boost × mention_boost ×
-budget_penalty × saturation_damper`). Engaged agents enter a fictional-time
-priority queue; activations run in parallel batches within a 60-minute
-fictional window (`BATCH_FICTIONAL_WINDOW_MIN`). Cascade depth is bounded
-(`CASCADE_MAX_DEPTH`). All timing is fictional minutes since Day 1 00:00,
-wall-clock-free. At each `day_end`: save → publish SSE → parallel memory
-consolidation per agent → clear notes.
+Round-robin, serial. Each fictional day is split into `ROUNDS_PER_DAY` (4)
+even windows across `[DAY_START_HOUR, DAY_END_HOUR]`. In every round each
+agent takes one turn in a seeded random order (`run_id × day × round_idx`)
+and rolls a participation probability:
+`participation_probability(persona) × time_of_day_window × mention_boost ×
+admin_announce_boost × saturation_damper × budget_damper × admin_ping_damper
+× quiet_morning_gate`. On hit they activate and see the FULL up-to-date
+state every other agent has produced this day so far. On miss they
+publish `agent_skipped_turn` and the round continues.
+
+Mid-day admin actions (announce/DM/motion) call
+`DayLoop.schedule_reactions(msg, force=True)` from `main.py`; in the
+round-robin model this just records the audience as owed-a-reaction. Those
+agents bypass the participation roll on their next turn. If all planned
+rounds finish and reactions remain owed, up to two **bonus drain rounds**
+service them before day_end. Pending admin DMs (recipient hasn't replied
+yet) bypass the roll automatically too.
+
+Why serial: parallel activation against the same snapshot was the cause
+of the v1 near-duplicate problem — agents B, C, D would each independently
+generate "ma cosa succede?" / "qualcuno spieghi" / "che cosa sta
+succedendo?" v1 caught these post-hoc with a regex; round-robin removes
+the cause (B sees what A just said before B acts).
+
+All timing is fictional minutes since Day 1 00:00, wall-clock-free. At
+each `day_end`: save → publish SSE → parallel memory consolidation per
+agent → clear notes → save again.
+
+Per-agent participation tuning lives in `data/buildings/{id}/residents.json`:
+`persona.participation_probability` is an optional 0..1 override. When
+unset, defaults derive from `responsiveness` (fast=0.85, medium=0.65,
+slow=0.35).
 
 ### Containment (`backend/tools.py`)
 
@@ -132,10 +156,12 @@ Two enforcement layers:
    proposing in-person meetings (`ci vediamo`, `passa da me`, `facciamo un
    caffè`, etc.). The condo exists **only in chat**.
 
-**Block-and-bail invariant**: near-duplicate resend detection sets
-`ctx.done = True`, ending the activation — this prevents the "tack on a
-different tail to slip past the filter" workaround. Regular refusals (DM
-cooldown) do NOT end the activation.
+Near-duplicate detection has been **removed**: the round-robin scheduler
+prevents the parallel-activation race that produced near-dupes in the
+first place, so the post-hoc fingerprint regex is no longer load-bearing.
+Content rule violations still set `ctx.done = True` and end the activation
+(prevents the "tack on a different tail to slip past the filter"
+workaround). DM cooldown refusals do NOT end the activation.
 
 **DM cooldown** (`_dm_cooldown_active`, `DM_REPLY_COOLDOWN_MIN = 240`
 fictional minutes): reply-gated, not turn-counted. An agent can send a

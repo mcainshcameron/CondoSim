@@ -1,57 +1,65 @@
-"""Reaction-cascade scheduler.
+"""Round-robin day scheduler.
 
-Implements the algorithm from GDD §Pacing / Scheduler:
-- Messages trigger audience-wide engagement rolls.
-- Engaged agents enter a fictional-time priority queue with a delay drawn
-  from their responsiveness profile.
-- Agents activate in fictional-time order. Their new messages re-cascade,
-  bounded by depth.
+Each fictional day is split into N rounds; in every round each agent takes
+exactly one turn (in a seeded random order) and rolls a participation
+probability. On a hit they activate and see the FULL up-to-date state
+(every message every other agent has produced this day so far). On a miss
+they publish `agent_skipped_turn` and the round continues.
 
-Everything here is wall-clock-free: all timing is fictional minutes since
-Day 1 00:00.
+Why this shape:
+- Serial activation removes the cause of v1's near-duplicate problem —
+  agents B/C/D no longer activate concurrently against the same snapshot
+  and rephrase the same impulse. They see what was already said.
+- Per-round participation rolls preserve the v1 engagement signal
+  (responsiveness, time-of-day, mention boost, saturation, admin-ping
+  damper) so Conti and Greco still feel different, just sequentially.
+- Mid-day admin actions (announce/DM/motion) keep the v1 surface:
+  `schedule_reactions(msg, force=True)` from main.py marks the recipients
+  as owed-a-reaction so they bypass the roll on their next turn (and get
+  a bonus drain pass if all planned rounds are already done).
+
+All timing is fictional minutes since Day 1 00:00 — wall-clock-free.
 """
 from __future__ import annotations
 
 import asyncio
-import heapq
 import random
-from dataclasses import dataclass
 
 from . import memory
 from .agent import activate_agent
 from .config import (
-    CASCADE_MAX_DEPTH,
     DAY_END_HOUR,
     DAY_START_HOUR,
     PER_AGENT_DAILY_SOFT_BUDGET,
+    ROUNDS_PER_DAY,
 )
 from .events import bus
 from .logging_utils import log, log_error
-from .models import Message, RunState
+from .models import Agent, Message, RunState
 from .storage import save_run
 
 
-BATCH_FICTIONAL_WINDOW_MIN = 60  # pull queue items within this many fictional minutes of the head
-
-
-RESPONSIVENESS_DELAY_MIN: dict[str, tuple[int, int]] = {
-    "fast": (5, 30),
-    "medium": (20, 120),
-    "slow": (60, 360),
-}
-
-RESPONSIVENESS_BASE_PROB: dict[str, float] = {
+# Fallback participation probability when persona.participation_probability
+# is None. Mirrors v1's RESPONSIVENESS_BASE_PROB so existing residents.json
+# behaviour is preserved.
+_RESPONSIVENESS_DEFAULT_PROB: dict[str, float] = {
     "fast": 0.85,
-    "medium": 0.6,
+    "medium": 0.65,
     "slow": 0.35,
 }
 
-# When within the day an agent prefers to reply (hours-of-day range)
+# When within the day an agent prefers to be on the phone (hours-of-day).
 TIME_OF_DAY_WINDOWS: dict[str, tuple[int, int]] = {
     "morning": (8, 13),
     "evening": (18, 23),
     "scattered": (8, 23),
 }
+
+# After the planned rounds, drain any pending admin-induced reactions with
+# at most this many extra passes. Bounded so a late admin burst can't loop
+# forever, but generous enough that announce + DM + motion in the same
+# minute all get serviced.
+_MAX_BONUS_ROUNDS = 2
 
 
 def day_start_minutes(day: int) -> int:
@@ -66,74 +74,14 @@ def hour_of(minutes: int) -> int:
     return (minutes % (24 * 60)) // 60
 
 
-def _clamp_to_window(target: int, window: tuple[int, int], day: int) -> int:
-    """Push target into this day's preferred window for the agent."""
-    start = (day - 1) * 24 * 60 + window[0] * 60
-    end = (day - 1) * 24 * 60 + window[1] * 60
-    if target < start:
-        return start + random.randint(0, 20)
-    if target > end:
-        return end  # missed window; scheduler will drop if past day_end
-    return target
-
-
-def _sample_activation_time(agent, from_minutes: int, day: int) -> int:
-    lo, hi = RESPONSIVENESS_DELAY_MIN[agent.persona.responsiveness]
-    delay = random.randint(lo, hi)
-    target = from_minutes + delay
-    window = TIME_OF_DAY_WINDOWS[agent.persona.time_of_day]
-    return _clamp_to_window(target, window, day)
-
-
-def _engagement_probability(agent, trigger: Message, state: RunState) -> float:
-    # Admin DMs always engage the recipient at 1.0. The recipient owes a
-    # reply; saturation/mention/budget dampers should not gate it. The
-    # explicit force=True path used by admin endpoints bypasses this whole
-    # function, but cascade paths (an agent's reaction triggering another
-    # roll on a DM chat) still hit it — this keeps behavior consistent.
-    chat = next((c for c in state.chats if c.id == trigger.chat_id), None)
-    if trigger.sender_kind == "admin" and chat is not None and chat.kind == "dm":
-        return 1.0
-    base = RESPONSIVENESS_BASE_PROB[agent.persona.responsiveness]
-    # @mention boost
-    if agent.persona.display_name.split()[0].lower() in trigger.content.lower():
-        base = max(base, 0.95)
-    # Admin announcements engage more broadly
-    if trigger.sender_kind == "admin":
-        base = min(1.0, base + 0.15)
-    # Soft budget pressure
-    if agent.messages_sent_today >= PER_AGENT_DAILY_SOFT_BUDGET:
-        base *= 0.3
-    # Saturation: if the agent has already sent 2+ messages in this chat today,
-    # sharp drop — avoids DM echo loops of "grazie / non ti preoccupare / grazie".
-    sent_here = sum(
-        1 for m in state.messages
-        if m.sender_id == agent.persona.id
-        and m.chat_id == trigger.chat_id
-        and m.day == state.clock.day
-    )
-    if sent_here >= 3:
-        base *= 0.10
-    elif sent_here >= 2:
-        base *= 0.30
-    # Pending-admin-reply damper: if the last message in this chat is a resident
-    # question/message and admin hasn't spoken since, agents who already posted
-    # today should wait rather than pile on. Prevents the hourly escalation
-    # spiral when admin is silent.
-    if trigger.sender_kind == "resident" and trigger.chat_id == "main":
-        last_admin_min = _last_admin_message_min_in_chat(state, trigger.chat_id)
-        # Messages addressed to/implying admin: if the trigger itself mentions
-        # admin or is a question, treat this as a pending ping.
-        trigger_pings_admin = _looks_like_admin_ping(trigger)
-        if trigger_pings_admin and sent_here >= 1:
-            hours_since_admin = (trigger.fictional_timestamp_minutes - last_admin_min) / 60.0
-            if hours_since_admin < 6.0:
-                base *= 0.20
-    return base
+def _baseline_probability(agent: Agent) -> float:
+    explicit = agent.persona.participation_probability
+    if explicit is not None:
+        return max(0.0, min(1.0, float(explicit)))
+    return _RESPONSIVENESS_DEFAULT_PROB.get(agent.persona.responsiveness, 0.5)
 
 
 def _last_admin_message_min_in_chat(state: RunState, chat_id: str) -> int:
-    """Fictional-minute timestamp of admin's most recent message in chat, or -1."""
     latest = -1
     for m in state.messages:
         if m.chat_id == chat_id and m.sender_kind == "admin":
@@ -150,18 +98,12 @@ _ADMIN_PING_WORDS = (
 
 
 def _looks_like_admin_ping(msg: Message) -> bool:
-    """Heuristic: does this resident message expect an admin reply?"""
     low = (msg.content or "").lower()
     return any(tok in low for tok in _ADMIN_PING_WORDS)
 
 
 def _unread_count_for_agent(state: RunState, agent_id: str) -> int:
-    """Messages in the agent's chats not authored by them, on today or yesterday.
-
-    Rough proxy — doesn't track read-cursors across activations, which is fine
-    for the morning check-in gate. We just want to know whether the agent has
-    anything worth reopening the phone for.
-    """
+    """Messages in the agent's chats not authored by them, today or yesterday."""
     today = state.clock.day
     chats_with_me = {c.id for c in state.chats if agent_id in c.member_ids}
     count = 0
@@ -180,89 +122,318 @@ def _main_chat_had_activity_on_day(state: RunState, chat_id: str, day: int) -> b
     return any(m.chat_id == chat_id and m.day == day for m in state.messages)
 
 
-@dataclass(order=True)
-class QueueItem:
-    at_minutes: int
-    seq: int
-    agent_id: str
-    trigger_msg_id: str
-    depth: int
+def _has_pending_admin_dm(state: RunState, agent_id: str, now: int) -> bool:
+    """Is there an admin DM whose last message is from admin and the agent
+    hasn't replied? Bypasses the participation roll — admin DMs always
+    deserve a reply."""
+    for chat in state.chats:
+        if chat.kind != "dm" or "admin" not in chat.member_ids:
+            continue
+        if agent_id not in chat.member_ids:
+            continue
+        latest: Message | None = None
+        for m in state.messages:
+            if m.chat_id != chat.id:
+                continue
+            if m.fictional_timestamp_minutes > now:
+                continue
+            if latest is None or m.fictional_timestamp_minutes > latest.fictional_timestamp_minutes:
+                latest = m
+        if latest is not None and latest.sender_id == "admin":
+            return True
+    return False
+
+
+def _was_mentioned_recently(state: RunState, agent: Agent, since_min: int, now: int) -> bool:
+    """Anyone @-mention or surname-call this agent in [since_min, now]?"""
+    needle = agent.persona.display_name.split()[-1].lower()
+    if len(needle) < 3:
+        return False
+    chats_with_me = {c.id for c in state.chats if agent.persona.id in c.member_ids}
+    for m in state.messages:
+        if m.chat_id not in chats_with_me:
+            continue
+        if m.sender_id == agent.persona.id:
+            continue
+        if m.fictional_timestamp_minutes < since_min or m.fictional_timestamp_minutes > now:
+            continue
+        if needle in (m.content or "").lower():
+            return True
+    return False
+
+
+def _admin_recently_announced(state: RunState, since_min: int, now: int) -> bool:
+    main_id = next((c.id for c in state.chats if c.kind == "main"), "main")
+    for m in state.messages:
+        if m.chat_id != main_id or m.sender_kind != "admin":
+            continue
+        if since_min <= m.fictional_timestamp_minutes <= now:
+            return True
+    return False
+
+
+def _participation_probability(
+    agent: Agent,
+    state: RunState,
+    fictional_minute: int,
+    is_first_round: bool,
+) -> float:
+    """Per-round participation probability, preserving v1's engagement signal.
+
+    Modifiers carried over from the v1 cascade engagement-roll function
+    (`_engagement_probability` in the old scheduler.py): mention boost,
+    admin-announcement boost, saturation, soft per-agent budget,
+    admin-ping damper. Time-of-day window is folded in here too instead
+    of being a hard fictional-minute clamp.
+    """
+    base = _baseline_probability(agent)
+    aid = agent.persona.id
+    day = state.clock.day
+    main_id = next((c.id for c in state.chats if c.kind == "main"), "main")
+
+    # Look back ~3 fictional hours from this turn for "recent" signals.
+    look_back_min = max(0, fictional_minute - 180)
+
+    # Mention boost — someone called this agent by name recently.
+    if _was_mentioned_recently(state, agent, look_back_min, fictional_minute):
+        base = max(base, 0.95)
+
+    # Admin announcement / DM / motion in the recent window pulls everyone
+    # back toward engagement.
+    if _admin_recently_announced(state, look_back_min, fictional_minute):
+        base = min(1.0, base + 0.15)
+
+    # Time-of-day preference: outside the agent's preferred window the
+    # probability is dampened. Replaces v1's hard fictional-minute clamp.
+    window = TIME_OF_DAY_WINDOWS.get(agent.persona.time_of_day, (8, 23))
+    hour = hour_of(fictional_minute)
+    if hour < window[0] or hour > window[1]:
+        base *= 0.4
+
+    # Soft per-agent daily budget.
+    if agent.messages_sent_today >= PER_AGENT_DAILY_SOFT_BUDGET:
+        base *= 0.3
+
+    # Per-chat saturation: if the agent has already filled a chat today,
+    # don't keep piling on.
+    sent_in_main = sum(
+        1 for m in state.messages
+        if m.sender_id == aid and m.chat_id == main_id and m.day == day
+    )
+    if sent_in_main >= 3:
+        base *= 0.20
+    elif sent_in_main >= 2:
+        base *= 0.50
+
+    # Admin-ping damper: if the most recent main-chat message is a
+    # resident question/ping aimed at admin and admin still hasn't replied,
+    # agents who already spoke today should hold off rather than escalate.
+    last_admin_min = _last_admin_message_min_in_chat(state, main_id)
+    last_main_msg: Message | None = None
+    for m in state.messages:
+        if m.chat_id != main_id or m.fictional_timestamp_minutes > fictional_minute:
+            continue
+        if last_main_msg is None or m.fictional_timestamp_minutes > last_main_msg.fictional_timestamp_minutes:
+            last_main_msg = m
+    if (
+        last_main_msg is not None
+        and last_main_msg.sender_kind == "resident"
+        and _looks_like_admin_ping(last_main_msg)
+        and sent_in_main >= 1
+    ):
+        hours_since_admin = (fictional_minute - last_admin_min) / 60.0 if last_admin_min >= 0 else 999
+        if hours_since_admin < 6.0:
+            base *= 0.20
+
+    # Day-1-morning / quiet-prior-day gate, but only on the first round of
+    # the day — later rounds are allowed to engage even if the morning was
+    # quiet, since the day may have woken up by then.
+    if is_first_round and day > 1:
+        unread = _unread_count_for_agent(state, aid)
+        yesterday_active = _main_chat_had_activity_on_day(state, main_id, day - 1)
+        if unread == 0 and not yesterday_active:
+            base *= 0.10
+
+    return max(0.0, min(1.0, base))
+
+
+def _allocate_round_window(day: int, round_idx: int, total_rounds: int) -> tuple[int, int]:
+    """Even split of the day's [day_start, day_end] across rounds."""
+    start = day_start_minutes(day)
+    end = day_end_minutes(day)
+    span = end - start
+    chunk = span // total_rounds
+    win_start = start + round_idx * chunk
+    win_end = start + (round_idx + 1) * chunk if round_idx < total_rounds - 1 else end
+    return win_start, win_end
+
+
+def _seed_for(run_id: str, day: int, round_idx: int) -> int:
+    return abs(hash((run_id, day, round_idx))) % (2**31)
 
 
 class DayLoop:
+    """Holds per-day state for the round-robin scheduler.
+
+    Public surface kept for compatibility with main.py admin endpoints:
+      - `state` attribute (mutated by admin handlers under state_lock)
+      - `schedule_reactions(msg, depth=0, force=True)` — called when admin
+        posts mid-day; marks the audience as owed-a-reaction so they
+        bypass the participation roll on their next turn (or get a bonus
+        drain pass if planned rounds already finished).
+    """
+
     def __init__(self, state: RunState):
         self.state = state
-        self.queue: list[QueueItem] = []
-        self.seq = 0
-        self.activated: set[tuple[str, str]] = set()  # (agent_id, trigger_msg_id)
-        # If an agent is already queued to react in a chat, we don't queue
-        # them again when more messages arrive in that chat — they'll see all
-        # accumulated messages on their single activation. Cleared when the
-        # agent actually activates.
-        self.chat_queued: set[tuple[str, str]] = set()  # (agent_id, chat_id)
-
-    def _push(self, item: QueueItem) -> None:
-        heapq.heappush(self.queue, item)
+        # agent_ids that owe a reaction to a fresh admin input.
+        self.pending_admin_reactions: set[str] = set()
 
     def _resident_ids(self) -> set[str]:
         return {a.persona.id for a in self.state.agents}
 
-    def schedule_reactions(self, trigger: Message, depth: int, force: bool = False) -> None:
-        """Schedule reaction activations for a new message's audience.
+    def schedule_reactions(self, trigger: Message, depth: int = 0, force: bool = False) -> None:
+        """Compatibility shim — main.py calls this after admin actions.
 
-        force=True: skip engagement probability roll and clamp past-day-end
-        activations to just before day close. Used for admin-originated
-        messages where a response is expected and shouldn't be random.
+        In round-robin there is no separate priority queue: agents see all
+        messages on their next turn naturally. We just record who owes
+        admin a reply so the participation roll is bypassed for them.
         """
-        if depth > CASCADE_MAX_DEPTH:
-            log("sched", f"cascade depth limit reached ({depth}), skipping")
-            return
         residents = self._resident_ids()
-        day_end = day_end_minutes(self.state.clock.day)
-        scheduled = 0
         for aid in trigger.audience:
-            if aid == trigger.sender_id:
+            if aid == trigger.sender_id or aid not in residents:
                 continue
-            if aid not in residents:
-                continue
-            key = (aid, trigger.id)
-            if key in self.activated:
-                continue
-            # Chat-level dedup: if agent is already queued to react in this
-            # chat, let them see all accumulated messages on their single
-            # pending activation rather than queueing them N times.
-            chat_key = (aid, trigger.chat_id)
-            if chat_key in self.chat_queued:
-                log("sched", f"  {aid} already queued for {trigger.chat_id}, skip extra trigger")
-                self.activated.add(key)
-                continue
-            agent = next(a for a in self.state.agents if a.persona.id == aid)
-            if not force:
-                prob = _engagement_probability(agent, trigger, self.state)
-                roll = random.random()
-                if roll > prob:
-                    log("sched", f"  {aid} skip (prob={prob:.2f} roll={roll:.2f}) for msg from {trigger.sender_display_name}")
-                    continue
-            at = _sample_activation_time(
-                agent, trigger.fictional_timestamp_minutes, self.state.clock.day
-            )
-            if at > day_end:
-                if force:
-                    at = day_end - 1
-                    log("sched", f"  {aid} FORCED clamp to day_end-1 (was {at})")
-                else:
-                    log("sched", f"  {aid} past day_end (at={at} > {day_end}), dropping")
-                    continue
-            self.activated.add(key)
-            self.chat_queued.add(chat_key)
-            self.seq += 1
-            self._push(QueueItem(at, self.seq, aid, trigger.id, depth))
-            scheduled += 1
-            log("sched", f"  {aid} SCHEDULED @min{at} depth={depth} force={force}")
-        # Mark the trigger as considered, regardless of how many recipients
-        # were actually scheduled. Prevents re-cascade on future days.
+            self.pending_admin_reactions.add(aid)
         trigger.cascaded = True
-        log("sched", f"schedule_reactions for msg '{trigger.content[:40]!r}' -> {scheduled} activations")
+        log(
+            "sched",
+            f"schedule_reactions force={force} owed={sorted(self.pending_admin_reactions)} "
+            f"(msg from {trigger.sender_display_name!r})",
+        )
+
+    async def _run_one_round(
+        self,
+        round_idx: int,
+        total_rounds: int,
+        is_first_round: bool,
+    ) -> int:
+        """Run a single round of the day loop. Returns activations executed."""
+        agents_in_run = list(self.state.agents)
+        seed = _seed_for(self.state.run_id, self.state.clock.day, round_idx)
+        rng = random.Random(seed)
+        order = rng.sample(agents_in_run, k=len(agents_in_run))
+
+        win_start, win_end = _allocate_round_window(
+            self.state.clock.day, round_idx, total_rounds
+        )
+        span = max(1, win_end - win_start)
+        tick = max(1, span // max(1, len(order)))
+
+        log(
+            "sched",
+            f"round {round_idx + 1}/{total_rounds} window=[{win_start},{win_end}] "
+            f"order={[a.persona.id for a in order]}",
+        )
+
+        activated = 0
+        for i, agent in enumerate(order):
+            aid = agent.persona.id
+            target = win_start + i * tick + rng.randint(0, max(1, tick // 3))
+            target = min(target, win_end - 1)
+
+            # Causality clamp: an agent can't act before events we know about.
+            clock_floor = self.state.clock.minutes_since_start
+            if target < clock_floor:
+                target = clock_floor
+
+            owed = aid in self.pending_admin_reactions
+            # If this agent is owed a reaction to admin input, push their
+            # target past the latest admin/external message addressed to
+            # them — otherwise they'd activate before the message exists in
+            # fictional time and not see it via read_inbox / _thread_status
+            # (both filter by `fictional_timestamp_minutes <= now`).
+            if owed:
+                latest_owed_min = -1
+                for m in self.state.messages:
+                    if m.sender_kind == "resident" or aid not in m.audience:
+                        continue
+                    if m.fictional_timestamp_minutes > latest_owed_min:
+                        latest_owed_min = m.fictional_timestamp_minutes
+                if latest_owed_min >= 0 and target <= latest_owed_min:
+                    # Small "I picked up the phone shortly after" delay so the
+                    # agent is reacting in the same minute, not racing the post.
+                    target = latest_owed_min + rng.randint(2, 25)
+            pending_dm = _has_pending_admin_dm(self.state, aid, target)
+            if owed or pending_dm:
+                prob = 1.0
+                forced_reason = "owed_admin_reaction" if owed else "pending_admin_dm"
+            else:
+                prob = _participation_probability(
+                    agent, self.state, target, is_first_round=is_first_round
+                )
+                forced_reason = None
+
+            roll = random.random()
+            if forced_reason is None and roll >= prob:
+                bus().publish(self.state.run_id, "agent_skipped_turn", {
+                    "agent_id": aid,
+                    "display_name": agent.persona.display_name,
+                    "round": round_idx,
+                    "prob": round(prob, 3),
+                    "roll": round(roll, 3),
+                    "fictional_minutes": target,
+                    "day": self.state.clock.day,
+                })
+                log(
+                    "sched",
+                    f"  {aid} skip round {round_idx + 1} (prob={prob:.2f} roll={roll:.2f}) @min{target}",
+                )
+                continue
+
+            log(
+                "sched",
+                f"  {aid} ACTIVATE round {round_idx + 1} @min{target} "
+                f"prob={prob:.2f} roll={roll:.2f}"
+                + (f" [{forced_reason}]" if forced_reason else ""),
+            )
+            try:
+                ctx = await activate_agent(
+                    self.state, aid, target, forced_for_admin=bool(forced_reason)
+                )
+            except Exception as exc:
+                log_error("sched", f"{aid} activation failed: {exc!r}")
+                continue
+            acknowledged = bool(ctx.sent_messages_this_activation) or bool(
+                ctx.reactions_added_this_activation
+            )
+            if forced_reason is not None and not acknowledged:
+                # Forced agent closed the phone without sending or reacting.
+                # Keep them in pending so the bonus drain retries them — the
+                # admin's message must not be silently ignored.
+                self.pending_admin_reactions.add(aid)
+                log(
+                    "sched",
+                    f"  {aid} forced ({forced_reason}) closed phone with no ack — kept owed",
+                )
+            else:
+                self.pending_admin_reactions.discard(aid)
+            activated += 1
+
+            # Advance the clock so subsequent agents in this round see the
+            # messages this one just sent.
+            new_msgs = list(ctx.sent_messages_this_activation)
+            for nm in new_msgs:
+                if nm.fictional_timestamp_minutes > self.state.clock.minutes_since_start:
+                    self.state.clock.minutes_since_start = nm.fictional_timestamp_minutes
+                # Mark these as cascaded so an admin-mutation racing the loop
+                # doesn't try to re-schedule them.
+                nm.cascaded = True
+
+        # Persist after every round so mid-day state is durable in Postgres.
+        try:
+            await save_run(self.state)
+        except Exception as exc:
+            log_error("sched", f"end-of-round save_run failed: {exc!r}")
+        return activated
 
     async def run(self) -> None:
         # Reset daily counters
@@ -270,154 +441,110 @@ class DayLoop:
             a.messages_sent_today = 0
 
         day = self.state.clock.day
-        log("sched", f"=== DAY {day} START ===")
+        log("sched", f"=== DAY {day} START === rounds={ROUNDS_PER_DAY}")
         bus().publish(self.state.run_id, "day_start", {"day": day})
 
-        # Seed from any non-resident message that hasn't been cascaded yet.
-        # This catches admin messages sent between days, during the previous
-        # day's consolidation window, or before the first advance — they
-        # carry the prior day's stamp but still deserve agent reactions.
-        seed_msgs = [m for m in self.state.messages if m.sender_kind != "resident" and not m.cascaded]
-        log("sched", f"seed: {len(seed_msgs)} uncascaded non-resident messages")
-        for m in seed_msgs:
-            self.schedule_reactions(m, depth=0)
+        # Seed pending reactions from any uncascaded non-resident message.
+        # Mirrors v1's "seed from any non-resident message that hasn't been
+        # cascaded yet" behaviour — admin messages sent between days, during
+        # consolidation, or before the first advance still get serviced.
+        for m in self.state.messages:
+            if m.sender_kind != "resident" and not m.cascaded:
+                for aid in m.audience:
+                    if aid != m.sender_id and aid in self._resident_ids():
+                        self.pending_admin_reactions.add(aid)
+                m.cascaded = True
+        if self.pending_admin_reactions:
+            log("sched", f"seeded pending reactions: {sorted(self.pending_admin_reactions)}")
 
-        # Morning check-in: every agent opens their phone in their preferred
-        # time-of-day window — but only if there's something to respond to.
-        # Without gating, on quiet days every agent re-reads yesterday's
-        # unanswered messages and restarts the anxiety spiral.
-        day_end = day_end_minutes(day)
-        main_chat_id = next((c.id for c in self.state.chats if c.kind == "main"), "main")
-        # Is there any new main-chat activity today that hasn't been cascaded
-        # into the queue yet? If today is day 1, seed_msgs already covers it.
-        # On later days, a check-in is useful only if yesterday had activity
-        # that might still need a follow-up, OR if the agent has unread messages.
-        for agent in self.state.agents:
-            aid = agent.persona.id
-            unread_count = _unread_count_for_agent(self.state, aid)
-            yesterday_saw_activity = _main_chat_had_activity_on_day(
-                self.state, main_chat_id, day - 1
-            ) if day > 1 else True
-            # Gate: skip if no unread AND yesterday was also quiet. Otherwise
-            # there's no reason for this agent to open the phone unprompted.
-            if unread_count == 0 and not yesterday_saw_activity:
-                log("sched", f"  {aid} check-in skipped (no unread, quiet prior day)")
-                continue
-            # Secondary gate: even with unread, if the unread is all stale
-            # admin-pings from >24h ago that this agent has already engaged
-            # with, skip — they'd just re-escalate.
-            if unread_count == 0:
-                # Only old activity, no actual unread. Skip most agents but
-                # allow a single random "conversation starter" per day so
-                # the day isn't totally dead.
-                if random.random() > 0.25:
-                    log("sched", f"  {aid} check-in skipped (nothing new to respond to)")
+        # Planned rounds
+        total_activations = 0
+        for round_idx in range(ROUNDS_PER_DAY):
+            total_activations += await self._run_one_round(
+                round_idx,
+                ROUNDS_PER_DAY,
+                is_first_round=(round_idx == 0),
+            )
+
+        # Bonus drain rounds: admin may have posted very late in the day,
+        # or some forced agents skipped earlier rounds because their turn
+        # came before the admin message landed. Run extra passes through
+        # just the agents who still owe a reaction, bounded by
+        # _MAX_BONUS_ROUNDS.
+        bonus = 0
+        while self.pending_admin_reactions and bonus < _MAX_BONUS_ROUNDS:
+            log("sched", f"bonus drain round {bonus + 1}: owed={sorted(self.pending_admin_reactions)}")
+            owed_now = list(self.pending_admin_reactions)
+            day_end = day_end_minutes(day)
+            for aid in owed_now:
+                agent = next((a for a in self.state.agents if a.persona.id == aid), None)
+                if agent is None:
+                    self.pending_admin_reactions.discard(aid)
                     continue
-            window = TIME_OF_DAY_WINDOWS[agent.persona.time_of_day]
-            window_start = (day - 1) * 24 * 60 + window[0] * 60
-            window_span = min(120, (window[1] - window[0]) * 60)
-            at = window_start + random.randint(0, window_span)
-            if at > day_end:
-                continue
-            self.seq += 1
-            self._push(QueueItem(at, self.seq, aid, f"checkin_d{day}_{aid}", depth=0))
-            self.activated.add((aid, f"checkin_d{day}_{aid}"))
-            log("sched", f"  {aid} morning check-in scheduled @min{at} (unread={unread_count})")
-        log("sched", f"initial queue size: {len(self.queue)}")
-
-        # Drain the queue in parallel batches. Each batch contains activations
-        # that can run concurrently: at most one per agent, within a small
-        # fictional-time window of the queue head. This is the main speedup
-        # lever — 5 agents reacting to the same admin announcement go out
-        # as parallel HTTP calls instead of sequential ones.
-        activated_count = 0
-        while self.queue:
-            first = heapq.heappop(self.queue)
-            window_end = first.at_minutes + BATCH_FICTIONAL_WINDOW_MIN
-            batch: list[QueueItem] = [first]
-            batch_agents: set[str] = {first.agent_id}
-            # Greedy take: include items within window that don't duplicate agent
-            while self.queue and self.queue[0].at_minutes <= window_end:
-                peek = self.queue[0]
-                if peek.agent_id in batch_agents:
-                    break  # same agent repeated — defer to next batch
-                item = heapq.heappop(self.queue)
-                batch.append(item)
-                batch_agents.add(item.agent_id)
-
-            # Causality clamp per item (can't act before events we know about)
-            clock_floor = self.state.clock.minutes_since_start
-            for item in batch:
-                if item.at_minutes < clock_floor:
-                    log("sched", f"{item.agent_id} clamped {item.at_minutes}->{clock_floor}")
-                    item.at_minutes = clock_floor
-
-            log("sched", f"batch: {len(batch)} activations — {[(i.agent_id, i.at_minutes) for i in batch]}")
-
-            # Clear chat-level queue entries for the activating agents — once
-            # they're running, future messages in those chats can re-queue them.
-            for it in batch:
-                for k in list(self.chat_queued):
-                    if k[0] == it.agent_id:
-                        self.chat_queued.discard(k)
-
-            # Run all activations concurrently
-            tasks = [
-                activate_agent(self.state, it.agent_id, it.at_minutes)
-                for it in batch
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            activated_count += len(batch)
-
-            # Collect per-activation new messages and cascade
-            max_time_reached = clock_floor
-            for it, res in zip(batch, results):
-                if isinstance(res, Exception):
-                    log_error("sched", f"{it.agent_id} failed: {res!r}")
+                # Bonus retries are spread across the remaining day so multiple
+                # owed agents don't all stamp the same minute.
+                base = max(self.state.clock.minutes_since_start + 5, day_end - 60)
+                target = min(base, day_end - 1)
+                log("sched", f"  {aid} BONUS activate @min{target}")
+                try:
+                    ctx = await activate_agent(
+                        self.state, aid, target, forced_for_admin=True
+                    )
+                except Exception as exc:
+                    log_error("sched", f"{aid} bonus activation failed: {exc!r}")
+                    self.pending_admin_reactions.discard(aid)
                     continue
-                new_msgs = list(res.sent_messages_this_activation)
-                for nm in new_msgs:
-                    if nm.fictional_timestamp_minutes > max_time_reached:
-                        max_time_reached = nm.fictional_timestamp_minutes
-                    self.schedule_reactions(nm, depth=it.depth + 1)
-
-            # Advance the clock to the latest fictional time reached
-            self.state.clock.minutes_since_start = max(max_time_reached, clock_floor)
-
-            # Persist after every batch so mid-day state is durable in Postgres.
-            # Without this, agent messages live only in RAM until day_end —
-            # a dyno restart, lost SSE packet, or UI refresh mid-day would make
-            # them invisible to the client (even though they'd eventually land
-            # at day_end). Cost: one UPSERT per ~5 agent activations.
+                acknowledged = bool(ctx.sent_messages_this_activation) or bool(
+                    ctx.reactions_added_this_activation
+                )
+                if acknowledged:
+                    self.pending_admin_reactions.discard(aid)
+                else:
+                    log("sched", f"  {aid} bonus activation no ack — will retry next bonus round")
+                total_activations += 1
+                for nm in ctx.sent_messages_this_activation:
+                    if nm.fictional_timestamp_minutes > self.state.clock.minutes_since_start:
+                        self.state.clock.minutes_since_start = nm.fictional_timestamp_minutes
+                    nm.cascaded = True
+            bonus += 1
             try:
                 await save_run(self.state)
             except Exception as exc:
-                log_error("sched", f"mid-batch save_run failed (will retry at day_end): {exc!r}")
+                log_error("sched", f"bonus-round save_run failed: {exc!r}")
+        if self.pending_admin_reactions:
+            log(
+                "sched",
+                f"WARNING: pending_admin_reactions still non-empty after "
+                f"{_MAX_BONUS_ROUNDS} bonus rounds: {sorted(self.pending_admin_reactions)}. "
+                f"Giving up so the day can end.",
+            )
+            self.pending_admin_reactions.clear()
 
-        log("sched", f"=== DAY {day} END === activations={activated_count} total_msgs={len(self.state.messages)}")
-        # End of day: clock to day_end
+        log(
+            "sched",
+            f"=== DAY {day} END === activations={total_activations} "
+            f"total_msgs={len(self.state.messages)}",
+        )
+        # End of day: clock to day_end so consolidation sees the full window.
         self.state.clock.minutes_since_start = day_end_minutes(day)
         # Persist BEFORE publishing day_end so any client that refetches on
-        # the event reads the up-to-date run (not the previous day's snapshot).
+        # the event reads the up-to-date run.
         await save_run(self.state)
         # Pop the active-loop entry NOW, before consolidation. From this
-        # point on the queue is no longer being drained, so admin endpoints
-        # must NOT see this loop as "live" (otherwise they'd push reactions
-        # into a dead queue and the agent would never respond). Any admin
-        # message arriving during consolidation routes through the
-        # `loop is None` branch and gets picked up by the next day's seed
-        # via Message.cascaded=False.
+        # point on the loop is no longer servicing turns, so admin endpoints
+        # must NOT see this loop as "live" — any admin message arriving
+        # during consolidation routes through the `loop is None` branch and
+        # gets picked up by the next day's seed via Message.cascaded=False.
         _ACTIVE_LOOPS.pop(self.state.run_id, None)
         bus().publish(self.state.run_id, "day_end", {
             "day": day,
-            "activations": activated_count,
+            "activations": total_activations,
             "total_messages": len(self.state.messages),
         })
         # Each agent writes their end-of-day diary entry into MEMORY.
-        # This is what makes day N+1 feel different from day N.
         await memory.consolidate_day(self.state, day)
         # Re-save AFTER consolidation: agent.notes are cleared inside
-        # _consolidate_one and that mutation needs to land in Postgres.
+        # consolidate and that mutation needs to land in Postgres.
         await save_run(self.state)
 
 
@@ -435,10 +562,7 @@ def setup_day(state: RunState) -> "DayLoop | None":
     the run is already ended.
 
     Split from `run_day` so callers can hold a lock across DB-load +
-    registration without holding it through the slow queue drain. After
-    setup_day returns, `active_loop(state.run_id)` is `loop`, which means
-    admin endpoints will use the shared state object instead of re-loading
-    from the DB and racing.
+    registration without holding it through the slow round drain.
     """
     if state.ended:
         return None
@@ -453,10 +577,9 @@ def setup_day(state: RunState) -> "DayLoop | None":
 
 
 async def run_day(loop: "DayLoop") -> None:
-    """Drain the registered loop's queue and run consolidation. Pops the
-    loop out of _ACTIVE_LOOPS regardless of outcome. (Note: DayLoop.run
-    pops itself early, before consolidation; this finally is a safety net.)
-    """
+    """Drain the registered loop's rounds and run consolidation. Pops the
+    loop out of _ACTIVE_LOOPS regardless of outcome (DayLoop.run pops
+    itself early; this finally is a safety net)."""
     try:
         await loop.run()
     finally:

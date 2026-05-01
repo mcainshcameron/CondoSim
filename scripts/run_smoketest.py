@@ -29,8 +29,8 @@ from backend.scheduler import advance_to_next_day, day_start_minutes
 from backend.storage import save_run
 
 
-TOTAL_DAYS = 3
-ADMIN_FOLLOWUP_ON_DAY = 2
+TOTAL_DAYS = 10
+ADMIN_FOLLOWUP_ON_DAY = 4
 ADMIN_FOLLOWUP_TEXT = (
     "Aggiornamento: ho parlato con il 1A, che conferma la lamentela e dice "
     "che gli episodi si sono ripetuti anche ieri notte. Per ora non procedo "

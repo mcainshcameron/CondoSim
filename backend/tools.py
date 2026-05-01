@@ -307,6 +307,11 @@ class ToolContext:
     current_fictional_minutes: int  # advances as the agent sends messages
     last_seen_message_ids: dict[str, str] = field(default_factory=dict)  # chat_id -> last read msg id
     sent_messages_this_activation: list[Message] = field(default_factory=list)
+    # Emoji reactions added this activation: list of (message_id, emoji). Used
+    # by the scheduler to detect "the agent acknowledged" — a forced
+    # activation that produces neither a sent message nor a reaction is not
+    # cleared from `pending_admin_reactions` and gets retried in a bonus drain.
+    reactions_added_this_activation: list[tuple[str, str]] = field(default_factory=list)
     blocked_sends: list[dict] = field(default_factory=list)  # containment audit
     done: bool = False
     # Tracks which chats the agent has already opened this activation so
@@ -363,9 +368,10 @@ def _resolve_chat(state: RunState, ref: str, current_agent_id: str | None = None
 DM_REPLY_COOLDOWN_MIN = 240  # fictional minutes to wait before re-DMing the same chat without a reply
 
 
-# Tiny Italian stopword set — function words, common pronouns, fillers. Kept
-# small on purpose: removing them tightens the content fingerprint without
-# stripping enough to make every short message look identical.
+# Tiny Italian stopword set — function words, common pronouns, fillers. Used
+# by `_find_message_in_chat_by_excerpt` for fuzzy excerpt-to-message matching
+# in `forward_message` / `react_to_message`. Removing them tightens the
+# token set without making every short message look identical.
 _IT_STOPWORDS = frozenset({
     "che", "cosa", "come", "dove", "quando", "perche", "perché",
     "una", "uno", "del", "della", "delle", "degli", "dei", "dal", "dalla",
@@ -384,40 +390,10 @@ _IT_STOPWORDS = frozenset({
 # accented letters. Lowercased upstream.
 _TOKEN_STRIP = re.compile(r"[^0-9a-zàèéìòùç]+")
 
-# Intent patterns: when two messages from the same sender both match the same
-# pattern within a short fictional window, the textual wording is irrelevant —
-# the *function* of the message is identical, which is the failure mode the
-# agents fall into (e.g., Sig.ra Conti at 10:08 and 10:21 both demanding an
-# explanation with different words).
-_INTENT_PATTERNS = {
-    "demand_explanation": re.compile(
-        r"(?:spieg(?:a|hi|are|atemi|atelo|atemelo)|"
-        r"chiari(?:re|sci|scimi|scitemi)|"
-        r"cosa\s+(?:succede|succ|sta\s+succedendo)|"
-        r"che\s+(?:cosa|sta)\s+(?:è|e)?\s*succe|"
-        r"qualcuno\s+(?:mi\s+)?(?:sa|spieg|dica|dice))",
-        re.IGNORECASE,
-    ),
-    "press_for_response": re.compile(
-        r"(?:rispondi(?:mi)?|batti\s+un\s+colpo|fatti\s+sentire|ci\s+sei\??|"
-        r"ti\s+leggiamo|ci\s+stai\s+(?:ignorando|leggendo)|aspettiamo)",
-        re.IGNORECASE,
-    ),
-}
-
-_INTENT_REPEAT_WINDOW_MIN = 180  # fictional minutes within which a same-intent repeat counts as a dup
-
-
-def _intent_of(text: str) -> str | None:
-    for label, pat in _INTENT_PATTERNS.items():
-        if pat.search(text or ""):
-            return label
-    return None
-
 
 def _tokens(s: str) -> set[str]:
     """Content tokens: lowercase, punctuation stripped, stopwords removed,
-    longer than 2 characters. The result is what we compare for similarity."""
+    longer than 2 characters."""
     out: set[str] = set()
     for raw in (s or "").lower().split():
         clean = _TOKEN_STRIP.sub("", raw)
@@ -425,60 +401,6 @@ def _tokens(s: str) -> set[str]:
             continue
         out.add(clean)
     return out
-
-
-def _is_near_duplicate(state: RunState, chat_id: str, sender_id: str, text: str) -> bool:
-    """Catch near-duplicate sends from the same agent in the same chat.
-
-    Checks against the last few messages from this sender in this chat (today):
-    - shared ≥25-char opener
-    - one fully contained in the other
-    - shared content words ≥ threshold (60% by default; 45% for short messages
-      where literal-word overlap is naturally lower but intent often identical)
-    """
-    norm = " ".join((text or "").lower().split())
-    if len(norm) < 15:
-        return False
-    norm_tokens = _tokens(norm)
-    norm_intent = _intent_of(text)
-    now_min = state.clock.minutes_since_start
-    day = state.clock.day
-    checked = 0
-    max_check = 5
-    for m in reversed(state.messages):
-        if m.day != day:
-            break
-        if m.chat_id != chat_id or m.sender_id != sender_id:
-            continue
-        prev = " ".join(m.content.lower().split())
-        cut = min(len(prev), len(norm), 40)
-        if cut >= 25 and prev[:cut] == norm[:cut]:
-            return True
-        if (len(norm) >= 25 and norm in prev) or (len(prev) >= 25 and prev in norm):
-            return True
-        # Intent-pattern repeat: two messages whose *function* is identical
-        # within ~3 fictional hours count as duplicates regardless of wording.
-        # Catches the "qualcuno spieghi" / "che cosa succede" pile-up where
-        # the agent rephrases the same demand each time.
-        if norm_intent is not None and _intent_of(m.content) == norm_intent:
-            elapsed = now_min - m.fictional_timestamp_minutes
-            if elapsed < _INTENT_REPEAT_WINDOW_MIN:
-                return True
-        # Word-overlap similarity: catches "Davide, scusa, ho letto..." vs
-        # "Giulia, ho visto ora il tuo messaggio..." — same intent, different
-        # wording. Threshold drops for short emotional outbursts where the
-        # shared content tokens are sparse.
-        prev_tokens = _tokens(prev)
-        if len(norm_tokens) >= 3 and len(prev_tokens) >= 3:
-            shared = norm_tokens & prev_tokens
-            smaller = min(len(norm_tokens), len(prev_tokens))
-            threshold = 0.45 if smaller < 8 else 0.60
-            if smaller > 0 and len(shared) / smaller >= threshold:
-                return True
-        checked += 1
-        if checked >= max_check:
-            break
-    return False
 
 
 def _last_message_in_chat(state: RunState, chat_id: str) -> Message | None:
@@ -661,9 +583,6 @@ def tool_send_message(ctx: ToolContext, chat_id: str, text: str) -> str:
             f"risposto. Dagli qualche ora prima di riscrivere — se hai altro da "
             f"fare altrove, fallo; altrimenti metti giù il telefono."
         )
-    if _is_near_duplicate(state, chat.id, ctx.agent_id, text):
-        ctx.done = True
-        return "Hai appena scritto qualcosa di molto simile. Non riformulare, non inventare scuse — metti giù il telefono."
 
     msg = _create_and_append_message(ctx, chat, ctx.agent_id, text)
     # Trust signal: attack-by-name in a main/group chat (public attacks only).
@@ -732,9 +651,6 @@ def tool_send_dm(ctx: ToolContext, recipient_id: str, text: str) -> str:
             f"hanno ancora risposto. Dagli qualche ora prima di riscrivere — se hai "
             f"altro da fare altrove, fallo; altrimenti metti giù il telefono."
         )
-    if _is_near_duplicate(state, dm_chat.id, ctx.agent_id, text):
-        ctx.done = True
-        return "Hai appena scritto qualcosa di molto simile a questa persona. Non riformulare, non inventare scuse — metti giù il telefono."
 
     # Detect reply-to-partner BEFORE the send: if the current last message in
     # this DM is from the recipient, this send closes the turn → +trust.
@@ -1036,6 +952,7 @@ def tool_react_to_message(ctx: ToolContext, chat: str, message_excerpt: str, emo
     bucket = msg.reactions.setdefault(emoji, [])
     if ctx.agent_id not in bucket:
         bucket.append(ctx.agent_id)
+    ctx.reactions_added_this_activation.append((msg.id, emoji))
     from .events import bus
     bus().publish(state.run_id, "reaction_added", {
         "message_id": msg.id,

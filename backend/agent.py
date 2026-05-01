@@ -85,7 +85,13 @@ async def build_system_prompt(state: RunState, agent: Agent) -> str:
     return "\n".join(lines)
 
 
-def build_notification_prompt(ctx: ToolContext, agent: Agent, inbox_text: str, notes_summary: str) -> str:
+def build_notification_prompt(
+    ctx: ToolContext,
+    agent: Agent,
+    inbox_text: str,
+    notes_summary: str,
+    forced_for_admin: bool = False,
+) -> str:
     state = ctx.state
     from .tools import _format_time_it  # local import to avoid cycle headaches
     now_str = _format_time_it(ctx.current_fictional_minutes, state.fictional_start_iso)
@@ -101,6 +107,18 @@ def build_notification_prompt(ctx: ToolContext, agent: Agent, inbox_text: str, n
         parts.extend([
             "",
             "L'amministratore ti ha scritto in privato e attende una risposta da te. Aprila ora prima di guardare il resto.",
+        ])
+
+    # When the scheduler woke this agent specifically because the admin
+    # said something they haven't acknowledged yet, make the expectation
+    # explicit: the agent must at least react (a message, an emoji, or a
+    # DM) — not just close the phone. This is the prompt-side half of the
+    # acknowledgment guarantee; the scheduler-side half retries forced
+    # activations that produce no observable output.
+    if forced_for_admin and not awaiting:
+        parts.extend([
+            "",
+            "L'amministratore ha scritto e tu non hai ancora reagito. Apri la chat, leggi cosa ha detto e fai sentire la tua presenza: un messaggio, anche breve, una reazione (👍 ❤️ 😡 🙄 ...), o aprigli un privato. Non chiudere il telefono senza dire niente.",
         ])
 
     parts.extend(["", inbox_text])
@@ -371,8 +389,14 @@ async def activate_agent(
     state: RunState,
     agent_id: str,
     fictional_minutes_now: int,
+    forced_for_admin: bool = False,
 ) -> ToolContext:
-    """Wake an agent at the given fictional time. Returns the ToolContext with results."""
+    """Wake an agent at the given fictional time. Returns the ToolContext with results.
+
+    `forced_for_admin=True` is set by the scheduler when this agent was
+    activated because they owe a reaction to an admin message; the
+    notification prompt then explicitly tells them so.
+    """
     agent = next(a for a in state.agents if a.persona.id == agent_id)
     ctx = ToolContext(
         state=state,
@@ -383,7 +407,9 @@ async def activate_agent(
     system_prompt = await build_system_prompt(state, agent)
     inbox_text = dispatch_tool(ctx, "read_inbox", {})
     notes_summary = _summarize_notes(agent)
-    user_prompt = build_notification_prompt(ctx, agent, inbox_text, notes_summary)
+    user_prompt = build_notification_prompt(
+        ctx, agent, inbox_text, notes_summary, forced_for_admin=forced_for_admin
+    )
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},

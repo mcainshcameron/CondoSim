@@ -25,3 +25,4 @@ data/_audit/
 # Smoketest output (run_smoketest.py)
 data/smoketest_*.log
 data/smoketest_*.md
+logs/

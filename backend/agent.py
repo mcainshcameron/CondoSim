@@ -148,16 +148,22 @@ def build_notification_prompt(
     if balance_hint:
         parts.extend(["", balance_hint])
 
-    # Three options presented as equals — no preference tilt — so the character's
-    # SOUL + what's happening decides, not the activation prompt's priming.
+    # Group-chat etiquette: answer direct admin questions even when others
+    # already have, but don't carbon-copy a peer's words. Replaces the older
+    # "non rispondere all'amministratore se gli altri l'hanno già fatto"
+    # framing, which was a v1 anti-pile-on rule that round-robin makes
+    # obsolete and that was suppressing legitimate group answers.
     parts.extend([
         "",
-        "Ricorda: nel gruppo, quando l'amministratore annuncia qualcosa e gli altri vicini hanno già risposto, la conversazione viva è **tra voi**, non verso di lui. Leggi cosa hanno scritto gli altri — se vuoi aggiungere qualcosa, rilancia con loro (citandoli o rispondendo a quello che hanno detto), o aprigli una chat privata se la cosa è tra due di voi. Non ripetere quello che stanno già dicendo tutti all'amministratore — è piatto e inutile.",
+        "Come funziona una chat di gruppo del condominio:",
+        "  • Se l'amministratore fa una domanda al gruppo o ti tocca direttamente, rispondi — la tua voce conta, anche se uno o due vicini hanno già scritto. Bastano poche parole tue (\"tutto ok\", \"per me sì\", \"non lo so\") o anche solo un emoji se non hai altro da aggiungere. Quello che NON va bene è non rispondere proprio.",
+        "  • Quando un altro vicino ha già fatto la TUA stessa domanda all'amministratore, non riformularla con parole tue: meglio una reazione emoji al suo messaggio (👍 / 🙄 / 😡 / 👀 a seconda di come la pensi), o aggiungere un dettaglio tuo se ce l'hai.",
+        "  • Quando la conversazione si è già spostata tra voi vicini (confronto, battibecco, alleanza), partecipa lì — non riportarla artificialmente verso l'amministratore.",
         "",
-        "In WhatsApp hai tre modi di reagire a quello che vedi, tutti normali:",
-        "  • Scrivere un messaggio, breve, quando hai qualcosa di tuo da dire.",
-        "  • Una reazione emoji (👍 ❤️ 😂 🙄 😡 ...) per dire \"ho letto\", \"sono d'accordo\", \"mi ha colpito\" senza dover scrivere.",
-        "  • Mettere giù il telefono se in questo momento non ti interessa.",
+        "Le tre azioni del telefono, tutte legittime:",
+        "  • Scrivere un messaggio breve quando hai qualcosa di tuo da dire o quando ti hanno chiesto qualcosa.",
+        "  • Una reazione emoji (👍 ❤️ 😂 🙄 😡 ...) per dire \"ho letto\" / \"d'accordo\" / \"non sono d'accordo\" senza scrivere.",
+        "  • Mettere giù il telefono se davvero non c'è niente che ti riguardi adesso (ma se l'amministratore ti ha chiesto qualcosa, almeno una reazione emoji ci sta sempre).",
         "",
         "Fai quello che faresti davvero nei panni di chi sei — non esagerare, ma non fare finta di non vedere quando ti interessa sul serio.",
     ])

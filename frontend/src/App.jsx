@@ -94,10 +94,19 @@ function Setup({ onCreated }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [openingText, setOpeningText] = useState('');
+  const textareaRef = useRef(null);
 
   useEffect(() => {
     api.defaultOpening().then(d => setOpeningText(d.text || '')).catch(() => {});
   }, []);
+
+  // Auto-grow the opening textarea with its content (capped by CSS max-height).
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, [openingText]);
 
   const handleCreate = async () => {
     setLoading(true); setError('');
@@ -211,10 +220,11 @@ function Setup({ onCreated }) {
                 </div>
               </div>
               <textarea
+                ref={textareaRef}
                 className="setup-textarea"
                 value={openingText}
                 onChange={e => setOpeningText(e.target.value)}
-                rows={12}
+                rows={2}
                 placeholder="Il tuo messaggio di apertura al condominio…"
               />
               <div className="setup-compose-hint">

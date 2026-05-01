@@ -1376,12 +1376,13 @@ export default function App() {
     return () => clearInterval(id);
   }, [state?.run_id]);
 
-  // Schedule the first auto-advance whenever a run is loaded (new or saved).
-  // Subsequent advances are scheduled inside onAdvance's success path, once
-  // the backend POST returns (and the per-run lock has been released).
+  // Kick off day 1 immediately when a run is loaded — the admin's opening
+  // message *is* the inciting event, no reason to make them watch a
+  // countdown before agents start reacting. Subsequent advances are
+  // scheduled inside onAdvance's success path with a small inter-day pause.
   useEffect(() => {
     if (!state?.run_id || state.ended || working || paused) return;
-    setNextAdvanceAt(Date.now() + 12000);
+    setNextAdvanceAt(Date.now());
   }, [state?.run_id]);
 
   // Fire the auto-advance once its scheduled time elapses.

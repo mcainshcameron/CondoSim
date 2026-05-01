@@ -374,28 +374,28 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
     .filter(m => m.votes && m.votes[agentId])
     .map(m => ({ motion: m, vote: m.votes[agentId] }));
 
+  const lastName = p.display_name.split(' ').slice(-1)[0] || p.display_name;
+  const ownerLabel = OWNER_KIND_LABEL[agent.owner.kind] || agent.owner.kind;
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
             <h2>{p.display_name}</h2>
-            <div className="modal-sub">Interno {p.unit} · {p.millesimi}/1000 millesimi · Portafoglio ~€{agent.starting_wallet_eur.toLocaleString('it-IT')}</div>
+            <div className="modal-sub">
+              Interno {p.unit} · {p.millesimi}/1000 millesimi
+              {' · ~€'}{agent.starting_wallet_eur.toLocaleString('it-IT')}
+              {' · ⏱️ '}{p.responsiveness}/{p.time_of_day}
+              {' · 📮 '}{allMessages.length} msg ({todayMsgs.length} oggi)
+              {godView && ownerLabel && ` · ${ownerLabel}`}
+            </div>
           </div>
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
 
-        <div className="modal-section">
-          <h3>Profilo pubblico</h3>
-          <p>{p.public_description}</p>
-          <div className="modal-meta">
-            <span>⏱️ {p.responsiveness} · {p.time_of_day}</span>
-            <span>📮 {allMessages.length} msg totali · {todayMsgs.length} oggi</span>
-          </div>
-        </div>
-
         <div className="modal-section goal-section">
-          <h3>🎯 Obiettivo aggiuntivo <span className="goal-hint">(entra nella testa di {p.display_name.split(' ').slice(-1)} al prossimo turno)</span></h3>
+          <h3>🎯 Obiettivo aggiuntivo <span className="goal-hint">(entra nella testa di {lastName} al prossimo turno)</span></h3>
           <textarea
             className="goal-textarea"
             placeholder="Es: 'Ti è venuta voglia di vendere l'appartamento e lasciare il palazzo il prima possibile'; oppure 'Hai appena scoperto che stai aspettando un bambino, tutto ti sembra più urgente'. Scritto in seconda persona, come se fosse un pensiero tuo."
@@ -425,6 +425,10 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
         </div>
 
         <div className="modal-section">
+          <p>{p.public_description}</p>
+        </div>
+
+        <div className="modal-section">
           <h3>Chat a cui partecipa ({theirChats.length})</h3>
           <div className="profile-chats">
             {chatSummary.map(({ chat, total, byThem, others }) => {
@@ -448,47 +452,11 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
           </div>
         </div>
 
-        {voteHistory.length > 0 && (
-          <div className="modal-section">
-            <h3>Voti ({voteHistory.length})</h3>
-            {voteHistory.map(({ motion, vote }) => (
-              <div key={motion.id} className="profile-vote">
-                <span>{vote === 'yes' ? '✅' : vote === 'no' ? '❌' : '⚪'}</span>
-                <span>{motion.title}</span>
-                <span className={`motion-status-tag ${motion.status}`}>{motion.status}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="modal-section">
-          <h3>Relazioni (fiducia)</h3>
-          <div className="profile-trust-grid">
-            {state.agents.filter(a => a.persona.id !== agentId).map(other => {
-              const out = trustOut[other.persona.id] ?? 0;
-              const inc = trustIn[other.persona.id] ?? 0;
-              return (
-                <div key={other.persona.id} className="profile-trust-row">
-                  <span>{other.persona.display_name.split(' ').slice(-1)}</span>
-                  <span style={{ color: out >= 0 ? '#2e7d32' : '#c23c3c' }}>
-                    → {out >= 0 ? '+' : ''}{out.toFixed(2)}
-                  </span>
-                  <span style={{ color: inc >= 0 ? '#2e7d32' : '#c23c3c' }}>
-                    ← {inc >= 0 ? '+' : ''}{inc.toFixed(2)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
         {godView && (
-          <div className="modal-section observer">
-            <h3>🔒 Modalità osservatore</h3>
-            <div className="observer-field">
-              <div className="observer-label">Tipo di proprietario</div>
-              <div>{OWNER_KIND_LABEL[agent.owner.kind] || agent.owner.kind}</div>
-            </div>
+          <details className="modal-section observer">
+            <summary className="observer-summary">
+              <span>🔒 Modalità osservatore</span>
+            </summary>
             <div className="observer-field">
               <div className="observer-label">
                 <button type="button" className="observer-toggle" onClick={toggleSoul}>
@@ -514,6 +482,38 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
                 <pre className="observer-markdown">{memoryText ?? 'Caricamento…'}</pre>
               )}
             </div>
+            <div className="observer-field">
+              <div className="observer-label">Relazioni (fiducia)</div>
+              <div className="profile-trust-grid">
+                {state.agents.filter(a => a.persona.id !== agentId).map(other => {
+                  const out = trustOut[other.persona.id] ?? 0;
+                  const inc = trustIn[other.persona.id] ?? 0;
+                  return (
+                    <div key={other.persona.id} className="profile-trust-row">
+                      <span>{other.persona.display_name.split(' ').slice(-1)}</span>
+                      <span style={{ color: out >= 0 ? '#2e7d32' : '#c23c3c' }}>
+                        → {out >= 0 ? '+' : ''}{out.toFixed(2)}
+                      </span>
+                      <span style={{ color: inc >= 0 ? '#2e7d32' : '#c23c3c' }}>
+                        ← {inc >= 0 ? '+' : ''}{inc.toFixed(2)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            {voteHistory.length > 0 && (
+              <div className="observer-field">
+                <div className="observer-label">Voti ({voteHistory.length})</div>
+                {voteHistory.map(({ motion, vote }) => (
+                  <div key={motion.id} className="profile-vote">
+                    <span>{vote === 'yes' ? '✅' : vote === 'no' ? '❌' : '⚪'}</span>
+                    <span>{motion.title}</span>
+                    <span className={`motion-status-tag ${motion.status}`}>{motion.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             {agent.notes?.length > 0 && (
               <div className="observer-field">
                 <div className="observer-label">Appunti privati ({agent.notes.length})</div>
@@ -522,7 +522,7 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
                 </ol>
               </div>
             )}
-          </div>
+          </details>
         )}
       </div>
     </div>
@@ -534,7 +534,7 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
 }
 
-function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, godView, onOpenProfile, onOpenConsole }) {
+function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, godView, onOpenProfile }) {
   // Compute DM partner counts + trust edges from current state
   const nameById = useMemo(() => {
     const m = {};
@@ -637,22 +637,8 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
     return pairs;
   }, [state.motions]);
 
-  const openMotionsCount = (state.motions || []).filter(m => m.status === 'open').length;
-
   return (
     <div className="panel">
-      {onOpenConsole && (
-        <button
-          type="button"
-          className="mobile-console-link"
-          onClick={onOpenConsole}
-        >
-          <span>📋 Console amministratore</span>
-          {openMotionsCount > 0 && (
-            <span className="mobile-console-link-badge">{openMotionsCount}</span>
-          )}
-        </button>
-      )}
       <div className="panel-title">Chat</div>
       <div className="chat-list">
         {chatListItems.length === 0 && (
@@ -1096,16 +1082,6 @@ function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions, onMobil
   const [motionTitle, setMotionTitle] = useState('');
   const [motionDesc, setMotionDesc] = useState('');
   const [status, setStatus] = useState('');
-  const [templates, setTemplates] = useState({ actions: [], motion_templates: [] });
-
-  useEffect(() => {
-    fetch(`${BACKEND}/api/quick_actions`).then(r => r.json()).then(setTemplates).catch(() => {});
-  }, []);
-
-  const fillTemplate = (tpl) => {
-    if (tpl.title) setMotionTitle(tpl.title);
-    if (tpl.description) setMotionDesc(tpl.description);
-  };
 
   const doAction = useCallback(async (fn, successMsg) => {
     try {
@@ -1187,18 +1163,6 @@ function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions, onMobil
 
         <details className="motion-file-details">
           <summary>+ Deposita una mozione</summary>
-          {templates.motion_templates?.length > 0 && (
-            <div className="template-row">
-              {templates.motion_templates.map(t => (
-                <button
-                  key={t.id}
-                  className="template-chip"
-                  title="Pre-compila gli effetti"
-                  onClick={() => fillTemplate(t)}
-                >{t.label}</button>
-              ))}
-            </div>
-          )}
           <input
             placeholder="Titolo…"
             value={motionTitle}
@@ -1301,9 +1265,9 @@ export default function App() {
   const [state, setState] = useState(null);
   const [selectedChatId, setSelectedChatId] = useState(null);
   const [working, setWorking] = useState(false);
-  const [typingByChat, setTypingByChat] = useState({});
   const [typingAgents, setTypingAgents] = useState({});
-  const [dayStatus, setDayStatus] = useState(null);
+  const [dayError, setDayError] = useState(null);
+  const [lastDayStats, setLastDayStats] = useState(null);
   // God-view: see all chats, including DMs between residents.
   // Default ON for gameplay clarity. Turn off for fiction-respecting play.
   const [godView, setGodView] = useState(true);
@@ -1607,15 +1571,15 @@ export default function App() {
       });
 
       es.addEventListener('day_start', (e) => {
-        const d = JSON.parse(e.data).data;
-        setDayStatus(`Giorno ${d.day} in corso…`);
+        setDayError(null);
+        setLastDayStats(null);
         setDayStartedAt(Date.now());
         setNextAdvanceAt(null);
       });
 
       es.addEventListener('day_end', (e) => {
         const d = JSON.parse(e.data).data;
-        setDayStatus(`Giorno ${d.day} concluso: ${d.activations} attivazioni, ${d.total_messages} messaggi totali.`);
+        setLastDayStats({ day: d.day, activations: d.activations, total_messages: d.total_messages });
         setDayStartedAt(null);
         setTypingAgents({});
         // NB: do NOT chain the next day or clear `working` here. day_end fires
@@ -1640,7 +1604,7 @@ export default function App() {
             return { ...fresh, messages: [...fresh.messages, ...extras] };
           });
           if (!d.ok) {
-            setDayStatus('Errore: il giorno non è terminato correttamente.');
+            setDayError('Errore: il giorno non è terminato correttamente.');
             return;
           }
           const nextDay = (fresh.clock?.day ?? 0) + 1;
@@ -1730,17 +1694,17 @@ export default function App() {
   }, [state?.run_id]);
 
   // Typing indicator shows on the main chat for now (we can't know which chat
-  // an agent is composing for until the message lands)
-  useEffect(() => {
+  // an agent is composing for until the message lands).
+  const typingByChat = useMemo(() => {
     const names = Object.values(typingAgents);
-    setTypingByChat(names.length > 0 ? { main: names } : {});
+    return names.length > 0 ? { main: names } : {};
   }, [typingAgents]);
 
   const onAdvance = useCallback(async () => {
     if (!state || working) return;
     setNextAdvanceAt(null);
     setWorking(true);
-    setDayStatus(`Avvio giorno ${state.clock.day}…`);
+    setDayError(null);
     try {
       // POST returns 202 immediately; the day runs as a background task on
       // the server. The day_done SSE handler clears `working`, refreshes
@@ -1751,11 +1715,8 @@ export default function App() {
       // happen if onAdvance fired twice (React state closure lag) or if a
       // day_done SSE was missed. Treat it as a no-op — the active day will
       // publish day_done on completion and chain the next advance.
-      if (e?.status === 409) {
-        // Leave the status alone; the in-flight day will update it via SSE.
-        return;
-      }
-      setDayStatus('Errore: ' + String(e));
+      if (e?.status === 409) return;
+      setDayError('Errore: ' + String(e));
       setWorking(false);
     }
   }, [state, working]);
@@ -1855,9 +1816,14 @@ export default function App() {
     topbarSub = `Giorno ${state.clock.day} · ⏸ in pausa`;
   } else if (nextAdvanceAt) {
     const secs = Math.max(0, Math.ceil((nextAdvanceAt - nowTick) / 1000));
-    topbarSub = state.clock.minutes_since_start === 0
-      ? `Giorno 1 inizia fra ${secs}s…`
-      : `Giorno ${state.clock.day} concluso · prossimo giorno fra ${secs}s…`;
+    if (state.clock.minutes_since_start === 0) {
+      topbarSub = `Giorno 1 inizia fra ${secs}s…`;
+    } else {
+      const stats = lastDayStats
+        ? ` · ${lastDayStats.activations} attivazioni · ${lastDayStats.total_messages} msg`
+        : '';
+      topbarSub = `Giorno ${state.clock.day} concluso${stats} · prossimo giorno fra ${secs}s…`;
+    }
   } else {
     topbarSub = `Giorno ${state.clock.day} · ${messagesToday} messaggi oggi`;
   }
@@ -1924,7 +1890,7 @@ export default function App() {
           </div>
         </div>
       </div>
-      {dayStatus && <div className="day-status-bar">{dayStatus}</div>}
+      {dayError && <div className="day-status-bar">{dayError}</div>}
       <div className="main" data-mobile-view={mobileView}>
         <LeftPanel
           state={state}
@@ -1935,7 +1901,6 @@ export default function App() {
           typingByChat={typingByChat}
           godView={godView}
           onOpenProfile={setProfileAgentId}
-          onOpenConsole={() => setMobileView('admin')}
         />
         <ChatColumn
           state={state}

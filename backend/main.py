@@ -149,10 +149,6 @@ class DMPayload(BaseModel):
     text: str
 
 
-class QuickActionPayload(BaseModel):
-    action: str  # see TEMPLATE_ACTIONS below
-
-
 class MotionPayload(BaseModel):
     title: str
     description: str
@@ -376,52 +372,6 @@ async def api_advance_day(request: Request, run_id: str):
     return {"ok": True, "status": "running"}
 
 
-# Pre-baked admin quick actions. action_id -> (label, main-chat body)
-QUICK_ACTIONS = {
-    "request_second_quote": (
-        "Richiedi altro preventivo",
-        lambda state: (
-            "Ho contattato un'altra ditta per un preventivo alternativo. "
-            "Vi aggiorno appena arriva."
-        ),
-    ),
-    "call_emergency_assembly": (
-        "Convoca assemblea urgente",
-        lambda state: (
-            "🏛️ Convoco un'assemblea condominiale straordinaria per domani "
-            "sera alle 21:00 (seconda convocazione). Ordine del giorno: "
-            "questioni aperte del condominio. La vostra presenza è necessaria."
-        ),
-    ),
-    "share_morosi_status": (
-        "Stato morosi",
-        lambda state: (
-            "📋 Aggiornamento sui pagamenti: al momento alcuni condomini sono "
-            "indietro con le quote. Li contatterò direttamente."
-        ),
-    ),
-}
-
-
-@app.post("/api/runs/{run_id}/admin/quick_action")
-async def api_quick_action(run_id: str, payload: QuickActionPayload):
-    action = QUICK_ACTIONS.get(payload.action)
-    if action is None:
-        raise HTTPException(status_code=400, detail=f"Azione sconosciuta: {payload.action}")
-    _label, body_fn = action
-    async with state_lock(run_id):
-        state = await _get_run_for_mutation(run_id)
-        loop = active_loop(run_id)
-        body = body_fn(state)
-        audience = sorted(_resident_ids(state))
-        msg = _append_admin_message(state, "main", body, audience)
-        bus().publish(run_id, "message_sent", {"message": msg.model_dump(), "chat": None})
-        if loop is not None:
-            loop.schedule_reactions(msg, depth=0, force=True)
-        await save_run(state)
-    return {"ok": True, "message": msg.model_dump()}
-
-
 @app.get("/api/runs/{run_id}/suggestions")
 async def api_run_suggestions(run_id: str):
     state = await _get_run(run_id)
@@ -429,14 +379,6 @@ async def api_run_suggestions(run_id: str):
     if loop is not None:
         state = loop.state
     return {"suggestions": compute_suggestions(state)}
-
-
-@app.get("/api/quick_actions")
-def api_list_quick_actions():
-    return {
-        "actions": [{"id": k, "label": v[0]} for k, v in QUICK_ACTIONS.items()],
-        "motion_templates": [],
-    }
 
 
 @app.post("/api/runs/{run_id}/motions")

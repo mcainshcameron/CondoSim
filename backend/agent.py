@@ -110,16 +110,39 @@ def build_notification_prompt(
         ])
 
     # When the scheduler woke this agent specifically because the admin
-    # said something they haven't acknowledged yet, make the expectation
-    # explicit: the agent must at least react (a message, an emoji, or a
-    # DM) — not just close the phone. This is the prompt-side half of the
-    # acknowledgment guarantee; the scheduler-side half retries forced
-    # activations that produce no observable output.
+    # said something they haven't acknowledged yet, surface the EXACT
+    # admin message inline so the agent reacts to it instead of pulling
+    # on a stale impulse from notes / older chat state. The
+    # acknowledgment guarantee retries forced activations that produce
+    # no observable output (sent message or emoji react).
     if forced_for_admin and not awaiting:
-        parts.extend([
-            "",
-            "L'amministratore ha scritto e tu non hai ancora reagito. Apri la chat, leggi cosa ha detto e fai sentire la tua presenza: un messaggio, anche breve, una reazione (👍 ❤️ 😡 🙄 ...), o aprigli un privato. Non chiudere il telefono senza dire niente.",
-        ])
+        owed_msg = _latest_unanswered_admin_in_main(
+            state, agent, ctx.current_fictional_minutes
+        )
+        if owed_msg is not None:
+            current_day = state.clock.day
+            when = _fmt_when(owed_msg.day, current_day, owed_msg.fictional_timestamp_minutes)
+            preview = owed_msg.content.strip().replace("\n", " ")
+            if len(preview) > 320:
+                preview = preview[:320] + "…"
+            parts.extend([
+                "",
+                f"L'amministratore ha scritto {when} e tu non hai ancora reagito.",
+                f"Cosa ha detto, parole sue: \"{preview}\"",
+                "La tua reazione adesso deve essere su QUESTO — non su una "
+                "domanda vecchia che avevi in testa o avevi negli appunti. "
+                "Se quello che ha detto chiude o tocca una richiesta che "
+                "tu o un altro vicino aveva sollevato, prendine atto invece "
+                "di rifare la stessa domanda. Se invece apre una nuova "
+                "questione per te, parlane. Bastano poche parole tue, o "
+                "anche solo una reazione emoji se non hai altro da aggiungere "
+                "— ma non chiudere il telefono senza dire niente.",
+            ])
+        else:
+            parts.extend([
+                "",
+                "L'amministratore ha scritto e tu non hai ancora reagito. Apri la chat, leggi cosa ha detto e fai sentire la tua presenza: un messaggio, anche breve, una reazione (👍 ❤️ 😡 🙄 ...), o aprigli un privato. Non chiudere il telefono senza dire niente.",
+            ])
 
     parts.extend(["", inbox_text])
 
@@ -241,6 +264,47 @@ def _fmt_when(msg_day: int, current_day: int, fictional_minutes: int) -> str:
     if gap == 1:
         return f"ieri alle {hm}"
     return f"{gap} giorni fa alle {hm}"
+
+
+def _latest_unanswered_admin_in_main(state: RunState, agent: Agent, now: int) -> Message | None:
+    """Most recent admin message in a chat the agent participates in (main
+    or admin DM) that this agent hasn't yet replied to OR reacted to.
+
+    "Replied" = the agent has authored at least one message in this chat
+    after the admin message. "Reacted" = the agent's id is in any of the
+    admin message's emoji reaction buckets. Either counts as
+    acknowledgment; if the agent has done neither, the admin message is
+    still owed.
+
+    Used by the forced-activation prompt to quote the exact thing the
+    agent is meant to respond to, instead of leaving them to dig it out
+    of MEMORY + thread_status + inbox noise."""
+    aid = agent.persona.id
+    chats_with_me = {c.id for c in state.chats if aid in c.member_ids}
+    candidate: Message | None = None
+    for m in state.messages:
+        if m.chat_id not in chats_with_me:
+            continue
+        if m.sender_kind == "resident" or m.sender_id == aid:
+            continue
+        if m.fictional_timestamp_minutes > now:
+            continue
+        if candidate is None or m.fictional_timestamp_minutes > candidate.fictional_timestamp_minutes:
+            candidate = m
+    if candidate is None:
+        return None
+    # Did the agent already react with an emoji to this message?
+    for bucket in candidate.reactions.values():
+        if aid in bucket:
+            return None
+    # Did the agent already reply (any message authored after `candidate`
+    # in the same chat)?
+    for m in state.messages:
+        if m.chat_id != candidate.chat_id or m.sender_id != aid:
+            continue
+        if m.fictional_timestamp_minutes > candidate.fictional_timestamp_minutes:
+            return None
+    return candidate
 
 
 def _admin_dms_awaiting_reply(state: RunState, agent: Agent, now: int) -> list[tuple]:

@@ -534,8 +534,7 @@ button {
 
 /* Observer-mode section. Rendered as <details> so the SOUL/MEMORY/
    trust/voti/notes cluster collapses into a single line by default —
-   present for godView power-users without crowding the goal+chats
-   above. */
+   keeps the cluster reachable without crowding the goal+chats above. */
 .modal-section.observer {
   background: #fff8e1;
   border-left: 3px solid #ffa000;
@@ -790,10 +789,6 @@ button {
   width: 100%;
 }
 .console .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.console .btn.advance {
-  background: #b8860b;
-  margin-top: 6px;
-}
 .console .btn.secondary {
   background: var(--panel-alt);
   color: var(--text);
@@ -807,25 +802,11 @@ button {
   min-height: 14px;
 }
 
-/* God-view toggle in topbar */
 .topbar-right {
   display: flex;
   align-items: center;
   gap: 12px;
 }
-.god-view-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  background: rgba(255,255,255,0.1);
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  user-select: none;
-}
-.god-view-toggle input { cursor: pointer; margin: 0; }
-.god-view-toggle:hover { background: rgba(255,255,255,0.2); }
 
 /* Pause/resume button in topbar */
 .pause-btn {
@@ -1698,10 +1679,6 @@ button {
   }
   /* Fictional clock duplicates topbar-sub on mobile — drop it. */
   .fictional-clock { display: none; }
-  /* Osservatore is a power-user toggle (shows hidden DMs); rare on
-     mobile, and the iOS-styled checkbox added a second visible blob
-     next to the eye. Hide on phones — desktop unchanged. */
-  .god-view-toggle { display: none; }
   .topbar-right {
     gap: 6px;
     flex-shrink: 0;

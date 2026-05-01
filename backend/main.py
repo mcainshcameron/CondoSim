@@ -195,6 +195,13 @@ def _resident_ids(state: RunState) -> set[str]:
     return {a.persona.id for a in state.agents}
 
 
+def _find_agent_or_404(state: RunState, agent_id: str):
+    agent = next((a for a in state.agents if a.persona.id == agent_id), None)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Residente non trovato")
+    return agent
+
+
 def _append_admin_message(state: RunState, chat_id: str, text: str, audience: list[str]) -> Message:
     # Advance fictional time by a small amount so it sits after prior messages
     state.clock.minutes_since_start = max(
@@ -418,8 +425,7 @@ async def api_file_motion(run_id: str, payload: MotionPayload):
 async def api_get_agent_soul(run_id: str, agent_id: str):
     """Return the agent's immutable SOUL.md as raw markdown."""
     state = await _get_run(run_id)
-    if not any(a.persona.id == agent_id for a in state.agents):
-        raise HTTPException(status_code=404, detail="Residente non trovato")
+    _find_agent_or_404(state, agent_id)
     return {"content": memory.read_soul(state, agent_id)}
 
 
@@ -427,8 +433,7 @@ async def api_get_agent_soul(run_id: str, agent_id: str):
 async def api_get_agent_memory(run_id: str, agent_id: str):
     """Return the agent's growing MEMORY (bio seed + day-end diary entries)."""
     state = await _get_run(run_id)
-    if not any(a.persona.id == agent_id for a in state.agents):
-        raise HTTPException(status_code=404, detail="Residente non trovato")
+    _find_agent_or_404(state, agent_id)
     return {"content": await memory.read_memory(state, agent_id)}
 
 
@@ -438,9 +443,7 @@ async def api_set_agent_goal(run_id: str, agent_id: str, payload: AgentGoalPaylo
     in the next activation. Framed in-fiction, never as 'admin said X'."""
     async with state_lock(run_id):
         state = await _get_run_for_mutation(run_id)
-        agent = next((a for a in state.agents if a.persona.id == agent_id), None)
-        if agent is None:
-            raise HTTPException(status_code=404, detail="Residente non trovato")
+        agent = _find_agent_or_404(state, agent_id)
         agent.admin_goal = (payload.goal or "").strip()
         bus().publish(run_id, "agent_goal_updated", {
             "agent_id": agent_id,

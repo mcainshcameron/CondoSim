@@ -196,9 +196,9 @@ MEMORY, not injected narration).
   the chain (read via `pausedRef` inside the SSE closure). A live mm:ss
   timer in the topbar sub shows elapsed real time on the current day.
 - Left chat list is scoped to admin-participating chats (main group + admin
-  DMs) regardless of Osservatore toggle. Inter-resident DMs surface in the
-  "DM frequenti" section at the bottom of the left panel and open in the
-  center column when clicked.
+  DMs). Inter-resident DMs surface in the "DM frequenti" section at the
+  bottom of the left panel and open in the center column when clicked
+  (read-only — the admin can observe but not write into them).
 - Typing indicator lives in the chat header sub (not the messages list) so
   it doesn't shove the last message up and down as it appears/disappears.
 

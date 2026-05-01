@@ -17,8 +17,6 @@ import heapq
 import random
 from dataclasses import dataclass
 
-import asyncio
-
 from . import memory
 from .agent import activate_agent
 from .config import (
@@ -179,12 +177,7 @@ def _unread_count_for_agent(state: RunState, agent_id: str) -> int:
 
 
 def _main_chat_had_activity_on_day(state: RunState, chat_id: str, day: int) -> bool:
-    if day < 1:
-        return False
-    for m in state.messages:
-        if m.chat_id == chat_id and m.day == day:
-            return True
-    return False
+    return any(m.chat_id == chat_id and m.day == day for m in state.messages)
 
 
 @dataclass(order=True)

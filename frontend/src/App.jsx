@@ -258,7 +258,7 @@ const OWNER_KIND_LABEL = {
   commercial_stake: 'Rappresenta un interesse commerciale',
 };
 
-function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSaved }) {
+function ProfileModal({ state, agentId, onClose, onOpenChat, onGoalSaved }) {
   const agent = state.agents.find(a => a.persona.id === agentId);
   const [goalDraft, setGoalDraft] = useState(agent?.admin_goal || '');
   const [goalSaving, setGoalSaving] = useState(false);
@@ -388,7 +388,7 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
               {' · ~€'}{agent.starting_wallet_eur.toLocaleString('it-IT')}
               {' · ⏱️ '}{p.responsiveness}/{p.time_of_day}
               {' · 📮 '}{allMessages.length} msg ({todayMsgs.length} oggi)
-              {godView && ownerLabel && ` · ${ownerLabel}`}
+              {ownerLabel && ` · ${ownerLabel}`}
             </div>
           </div>
           <button className="modal-close" onClick={onClose}>✕</button>
@@ -431,99 +431,94 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, godView, onGoalSave
         <div className="modal-section">
           <h3>Chat a cui partecipa ({theirChats.length})</h3>
           <div className="profile-chats">
-            {chatSummary.map(({ chat, total, byThem, others }) => {
-              const canOpen = godView || chat.member_ids.includes('admin') || chat.kind === 'main';
-              return (
-                <div
-                  key={chat.id}
-                  className={`profile-chat-row ${canOpen ? 'clickable' : ''}`}
-                  onClick={() => canOpen && onOpenChat(chat.id)}
-                >
-                  <div>
-                    <strong>{chat.display_name}</strong>
-                    <span className="profile-chat-with"> con {others || '—'}</span>
-                  </div>
-                  <div className="profile-chat-meta">
-                    {byThem}/{total} msg{canOpen && <span style={{color:'var(--brand)', marginLeft: 6}}>→</span>}
-                  </div>
+            {chatSummary.map(({ chat, total, byThem, others }) => (
+              <div
+                key={chat.id}
+                className="profile-chat-row clickable"
+                onClick={() => onOpenChat(chat.id)}
+              >
+                <div>
+                  <strong>{chat.display_name}</strong>
+                  <span className="profile-chat-with"> con {others || '—'}</span>
                 </div>
-              );
-            })}
+                <div className="profile-chat-meta">
+                  {byThem}/{total} msg<span style={{color:'var(--brand)', marginLeft: 6}}>→</span>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
-        {godView && (
-          <details className="modal-section observer">
-            <summary className="observer-summary">
-              <span>🔒 Modalità osservatore</span>
-            </summary>
-            <div className="observer-field">
-              <div className="observer-label">
-                <button type="button" className="observer-toggle" onClick={toggleSoul}>
-                  {showSoul ? '▾' : '▸'} SOUL.md (identità, immutabile)
-                </button>
-              </div>
-              {showSoul && (
-                <pre className="observer-markdown">{soulText ?? 'Caricamento…'}</pre>
-              )}
+        <details className="modal-section observer">
+          <summary className="observer-summary">
+            <span>🔒 Modalità osservatore</span>
+          </summary>
+          <div className="observer-field">
+            <div className="observer-label">
+              <button type="button" className="observer-toggle" onClick={toggleSoul}>
+                {showSoul ? '▾' : '▸'} SOUL.md (identità, immutabile)
+              </button>
             </div>
-            <div className="observer-field">
-              <div className="observer-label">
-                <button type="button" className="observer-toggle" onClick={toggleMemory}>
-                  {showMemory ? '▾' : '▸'} MEMORY.md (taccuino, cresce giorno per giorno)
-                </button>
-                {showMemory && (
-                  <button type="button" className="observer-toggle-small" onClick={refreshMemory} title="Ricarica">
-                    ↻
-                  </button>
-                )}
-              </div>
+            {showSoul && (
+              <pre className="observer-markdown">{soulText ?? 'Caricamento…'}</pre>
+            )}
+          </div>
+          <div className="observer-field">
+            <div className="observer-label">
+              <button type="button" className="observer-toggle" onClick={toggleMemory}>
+                {showMemory ? '▾' : '▸'} MEMORY.md (taccuino, cresce giorno per giorno)
+              </button>
               {showMemory && (
-                <pre className="observer-markdown">{memoryText ?? 'Caricamento…'}</pre>
+                <button type="button" className="observer-toggle-small" onClick={refreshMemory} title="Ricarica">
+                  ↻
+                </button>
               )}
             </div>
-            <div className="observer-field">
-              <div className="observer-label">Relazioni (fiducia)</div>
-              <div className="profile-trust-grid">
-                {state.agents.filter(a => a.persona.id !== agentId).map(other => {
-                  const out = trustOut[other.persona.id] ?? 0;
-                  const inc = trustIn[other.persona.id] ?? 0;
-                  return (
-                    <div key={other.persona.id} className="profile-trust-row">
-                      <span>{other.persona.display_name.split(' ').slice(-1)}</span>
-                      <span style={{ color: out >= 0 ? '#2e7d32' : '#c23c3c' }}>
-                        → {out >= 0 ? '+' : ''}{out.toFixed(2)}
-                      </span>
-                      <span style={{ color: inc >= 0 ? '#2e7d32' : '#c23c3c' }}>
-                        ← {inc >= 0 ? '+' : ''}{inc.toFixed(2)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-            {voteHistory.length > 0 && (
-              <div className="observer-field">
-                <div className="observer-label">Voti ({voteHistory.length})</div>
-                {voteHistory.map(({ motion, vote }) => (
-                  <div key={motion.id} className="profile-vote">
-                    <span>{vote === 'yes' ? '✅' : vote === 'no' ? '❌' : '⚪'}</span>
-                    <span>{motion.title}</span>
-                    <span className={`motion-status-tag ${motion.status}`}>{motion.status}</span>
+            {showMemory && (
+              <pre className="observer-markdown">{memoryText ?? 'Caricamento…'}</pre>
+            )}
+          </div>
+          <div className="observer-field">
+            <div className="observer-label">Relazioni (fiducia)</div>
+            <div className="profile-trust-grid">
+              {state.agents.filter(a => a.persona.id !== agentId).map(other => {
+                const out = trustOut[other.persona.id] ?? 0;
+                const inc = trustIn[other.persona.id] ?? 0;
+                return (
+                  <div key={other.persona.id} className="profile-trust-row">
+                    <span>{other.persona.display_name.split(' ').slice(-1)}</span>
+                    <span style={{ color: out >= 0 ? '#2e7d32' : '#c23c3c' }}>
+                      → {out >= 0 ? '+' : ''}{out.toFixed(2)}
+                    </span>
+                    <span style={{ color: inc >= 0 ? '#2e7d32' : '#c23c3c' }}>
+                      ← {inc >= 0 ? '+' : ''}{inc.toFixed(2)}
+                    </span>
                   </div>
-                ))}
-              </div>
-            )}
-            {agent.notes?.length > 0 && (
-              <div className="observer-field">
-                <div className="observer-label">Appunti privati ({agent.notes.length})</div>
-                <ol className="observer-notes">
-                  {agent.notes.map((n, i) => <li key={i}>{n}</li>)}
-                </ol>
-              </div>
-            )}
-          </details>
-        )}
+                );
+              })}
+            </div>
+          </div>
+          {voteHistory.length > 0 && (
+            <div className="observer-field">
+              <div className="observer-label">Voti ({voteHistory.length})</div>
+              {voteHistory.map(({ motion, vote }) => (
+                <div key={motion.id} className="profile-vote">
+                  <span>{vote === 'yes' ? '✅' : vote === 'no' ? '❌' : '⚪'}</span>
+                  <span>{motion.title}</span>
+                  <span className={`motion-status-tag ${motion.status}`}>{motion.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {agent.notes?.length > 0 && (
+            <div className="observer-field">
+              <div className="observer-label">Appunti privati ({agent.notes.length})</div>
+              <ol className="observer-notes">
+                {agent.notes.map((n, i) => <li key={i}>{n}</li>)}
+              </ol>
+            </div>
+          )}
+        </details>
       </div>
     </div>
   );
@@ -534,7 +529,7 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
 }
 
-function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, godView, onOpenProfile }) {
+function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, onOpenProfile }) {
   // Compute DM partner counts + trust edges from current state
   const nameById = useMemo(() => {
     const m = {};
@@ -545,7 +540,7 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
 
   // Chat list shows only admin-participating conversations (group + admin DMs).
   // Inter-resident DMs live in the "DM frequenti" section below and open in
-  // the center column when clicked — godView doesn't widen this list.
+  // the center column when clicked.
   const visibleChats = useMemo(() =>
     state.chats.filter(c =>
       c.kind === 'main' || c.kind === 'assembly' || c.member_ids.includes('admin')
@@ -758,13 +753,13 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
                 const key = [p.a, p.b].sort().join('|');
                 const v = alignedPairs[key];
                 const chatId = findChatForPair(state, p.a, p.b);
-                const canOpen = chatId && (godView || state.chats.find(c => c.id === chatId)?.member_ids.includes('admin'));
+                const canOpen = !!chatId;
                 return (
                   <div
                     key={i}
                     className={`alliance-row ${canOpen ? 'clickable' : ''}`}
                     onClick={() => canOpen && onSelectChat(chatId)}
-                    title={canOpen ? 'Apri la chat' : 'Chat privata — visibile solo se trapela o con modalità osservatore'}
+                    title={canOpen ? 'Apri la chat' : 'Chat non ancora aperta'}
                   >
                     <span className="alliance-pair">
                       {(nameById[p.a] || p.a).split(' ').slice(-1)} ↔ {(nameById[p.b] || p.b).split(' ').slice(-1)}
@@ -782,14 +777,6 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
         </>
       )}
     </div>
-  );
-}
-
-function visibleChatsForAdmin(state, godView) {
-  if (godView) return state.chats;
-  // Fiction-respecting: admin sees main + any chat they're a member of.
-  return state.chats.filter(c =>
-    c.kind === 'main' || c.kind === 'assembly' || c.member_ids.includes('admin')
   );
 }
 
@@ -812,7 +799,7 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
   const otherAgent = otherId ? state.agents.find(a => a.persona.id === otherId) : null;
 
   let mode = 'disabled';
-  let placeholder = 'Non puoi scrivere in questa chat (visibile solo in modalità osservatore).';
+  let placeholder = 'Chat privata tra residenti — puoi solo osservare.';
   let label = '';
   if (isGroup) {
     mode = 'announce';
@@ -897,8 +884,8 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
   );
 }
 
-function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, godView, suggestions, onSendAnnounce, onSendDm, onOpenProfile, onMobileBack, onOpenConsole }) {
-  const chats = visibleChatsForAdmin(state, godView);
+function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggestions, onSendAnnounce, onSendDm, onOpenProfile, onMobileBack, onOpenConsole }) {
+  const chats = state.chats;
   const msgsByChat = useMemo(() => {
     const m = new Map();
     for (const c of chats) m.set(c.id, []);
@@ -1247,7 +1234,7 @@ function HelpModal({ onClose }) {
 
         <div className="modal-section help-section">
           <h3>Modalità osservatore 👁️</h3>
-          <p>L'interruttore in alto a destra mostra anche le DM tra residenti e la loro memoria privata. Spegnilo per un'esperienza più realistica, lasciato acceso per vedere tutto.</p>
+          <p>Vedi tutte le chat (incluse le DM tra residenti) e, dal profilo di un residente, la sua identità (SOUL) e il taccuino privato (MEMORY) che cresce ogni giorno.</p>
         </div>
 
         <div className="modal-section" style={{ textAlign: 'center', borderBottom: 'none' }}>
@@ -1268,9 +1255,6 @@ export default function App() {
   const [typingAgents, setTypingAgents] = useState({});
   const [dayError, setDayError] = useState(null);
   const [lastDayStats, setLastDayStats] = useState(null);
-  // God-view: see all chats, including DMs between residents.
-  // Default ON for gameplay clarity. Turn off for fiction-respecting play.
-  const [godView, setGodView] = useState(true);
   const [profileAgentId, setProfileAgentId] = useState(null);
   const [unreadByChat, setUnreadByChat] = useState({});
   const [suggestions, setSuggestions] = useState([]);
@@ -1875,14 +1859,6 @@ export default function App() {
             title="Come si gioca"
             aria-label="Come si gioca"
           >?</button>
-          <label className="god-view-toggle" title="Mostra tutte le chat (incluse le DM tra altri residenti). Spegni per gioco fedele alla finzione.">
-            <input
-              type="checkbox"
-              checked={godView}
-              onChange={e => setGodView(e.target.checked)}
-            />
-            <span>👁️ Osservatore</span>
-          </label>
           <div className="day-badge">
             <span className="day-badge-n">{state.clock.day}</span>
             <span className="day-badge-sep">/</span>
@@ -1899,7 +1875,6 @@ export default function App() {
           onStartDm={handleStartDm}
           unreadByChat={unreadByChat}
           typingByChat={typingByChat}
-          godView={godView}
           onOpenProfile={setProfileAgentId}
         />
         <ChatColumn
@@ -1907,7 +1882,6 @@ export default function App() {
           selectedChatId={selectedChatId}
           pendingChat={pendingDmChat}
           typingByChat={typingByChat}
-          godView={godView}
           suggestions={suggestions}
           onSendAnnounce={onSendAnnounce}
           onSendDm={onSendDm}
@@ -1932,7 +1906,6 @@ export default function App() {
           agentId={profileAgentId}
           onClose={() => setProfileAgentId(null)}
           onOpenChat={(chatId) => { setSelectedChatId(chatId); setProfileAgentId(null); }}
-          godView={godView}
           onGoalSaved={(aid, goal) => {
             setState(prev => prev ? {
               ...prev,

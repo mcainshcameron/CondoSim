@@ -51,17 +51,13 @@ _AGGRESSION_TERMS = [
 # Core
 # ---------------------------------------------------------------------------
 
-def _clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, x))
-
-
 def _resident_ids(state: RunState) -> set[str]:
     return {a.persona.id for a in state.agents}
 
 
 def _update(state: RunState, src: str, dst: str, delta: float) -> float:
-    """Apply delta to trust[src][dst]. Return the new value."""
-    new = _clamp(state.trust.setdefault(src, {}).get(dst, 0.0) + delta)
+    """Apply delta to trust[src][dst], clamped to [-1, 1]. Return the new value."""
+    new = max(-1.0, min(1.0, state.trust.setdefault(src, {}).get(dst, 0.0) + delta))
     state.trust[src][dst] = new
     return new
 

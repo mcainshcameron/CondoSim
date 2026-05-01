@@ -37,7 +37,7 @@ db/migrations/
   001_init.sql      # runs + agent_memory tables, applied idempotently at startup
 
 frontend/
-  src/App.jsx       # React UI: resident panel, chat column, admin console, observer
+  src/App.jsx       # React UI: resident panel, chat column, admin console, profile modal
   src/Login.jsx     # Password entry screen (gated by /api/health auth check)
   src/api.js        # API client (relative URLs; VITE_API_BASE override for dev)
   src/App.css       # WhatsApp-style styling + login card
@@ -186,7 +186,7 @@ Frontend rule: `onAdvance` only kicks off the work (`api.advanceDay(id)` → 202
 
 - WhatsApp-style layout (topbar, left chat+resident panel, chat column, admin console for motions)
 - **Auto-advance days** with ⏸ Pausa / ▶ Riprendi toggle in the topbar and a live mm:ss timer in the topbar sub. Scheduling keyed off the `advance_day` POST response (not `day_end` SSE — see §4.7), so backend memory consolidation completes before the next day starts. Short grace delay on run load, ~3s pause between days.
-- Left chat list scoped to admin-participating chats (main + admin DMs) regardless of Osservatore; inter-resident DMs surface in "DM frequenti" at the bottom and open in the center column when clicked
+- Left chat list scoped to admin-participating chats (main + admin DMs); inter-resident DMs surface in "DM frequenti" at the bottom and open read-only in the center column when clicked
 - Typing indicator lives in the chat header sub, not the messages list — prevents the last message from being shoved up and down as agents start/stop typing
 - Setup screen with cast preview + admin's opening-message compose
 - Profile modal: admin-goal editor, chat participation summary, trust view, **SOUL.md + MEMORY.md collapsible viewers**
@@ -263,7 +263,7 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 **Option (not currently needed)**: re-expose strong trust signals in the prompt once the matrix has meaningful values (e.g. `|score| >= 0.3`). Deferred until we see whether MEMORY-carried relationships alone produce good enough coherence. The matrix is now observable (panel populates), so this is easy to evaluate.
 
-### 6.7 Frontend: observer MEMORY viewer doesn't auto-refresh
+### 6.7 Frontend: MEMORY viewer doesn't auto-refresh
 
 **Status**: MEMORY.md viewer in profile modal has a manual refresh (↻). It doesn't auto-update when a new day's consolidation writes to the file.
 
@@ -279,7 +279,7 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 **Status**: every activation and consolidation is an API call. No per-run cost tracking or token accounting.
 
-**Fix direction**: aggregate `usage.prompt_tokens` / `completion_tokens` from openrouter responses into the RunState. Display total on the observer. Estimated 30 min.
+**Fix direction**: aggregate `usage.prompt_tokens` / `completion_tokens` from openrouter responses into the RunState. Display total in the UI. Estimated 30 min.
 
 ### 6.10 No tests
 
@@ -293,7 +293,7 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 In order of user impact / effort ratio:
 
-1. **MEMORY viewer auto-refresh on SSE** (6.7) — 10 min, makes the observer useful during live play
+1. **MEMORY viewer auto-refresh on SSE** (6.7) — 10 min, makes the MEMORY viewer useful during live play
 2. **Admin-goal discoverability in UI** — ensure the UI clearly shows goal state per resident and makes setting/clearing easy. User flagged this as important. Worth auditing the current AdminConsole UX.
 3. **Admin-bot for DM replies** (6.4) — 1h, removes the dead-end feel of admin DMs
 4. **Second building** (6.8) — content exercise, not code. 1h to author + 15 min for UI selector

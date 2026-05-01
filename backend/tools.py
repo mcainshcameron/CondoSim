@@ -752,6 +752,11 @@ def _close_motion_if_ready(ctx: ToolContext, motion: Motion) -> None:
     motion.closed_at_fictional_min = ctx.current_fictional_minutes
     motion.outcome_note = f"{yes_count} sì, {no_count} no, {abst_count} astenuti"
 
+    # Trust signal — same as the manual-close path in main.py:api_close_motion.
+    # Without this, motions that auto-close don't produce alignment/opposition
+    # deltas and the trust matrix only reflects manual closes.
+    dials.apply_trust_from_votes(state, motion)
+
     main_chat = _chat_by_id(state, "main")
     if main_chat is not None:
         verdict = "approvata" if outcome == "passed" else "respinta"

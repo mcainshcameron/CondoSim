@@ -12,6 +12,7 @@ to a directory under DATA_DIR/buildings/; the code is scenario-free.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -32,6 +33,7 @@ from .models import (
 )
 
 BUILDINGS_DIR = DATA_DIR / "buildings"
+_BUILDING_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +58,9 @@ class ResidentTemplate(BaseModel):
 # ---------------------------------------------------------------------------
 
 def building_dir(building_id: str) -> Path:
+    building_id = (building_id or "").strip()
+    if not _BUILDING_ID_RE.fullmatch(building_id):
+        raise ValueError("building_id non valido")
     return BUILDINGS_DIR / building_id
 
 
@@ -73,11 +78,15 @@ def memory_seeds_dir(building_id: str) -> Path:
 
 def load_building(building_id: str) -> BuildingConfig:
     path = building_dir(building_id) / "building.json"
+    if not path.exists():
+        raise ValueError(f"Building {building_id} not found")
     return BuildingConfig.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def load_residents(building_id: str) -> list[Agent]:
     path = building_dir(building_id) / "residents.json"
+    if not path.exists():
+        raise ValueError(f"Residents for building {building_id} not found")
     raw = json.loads(path.read_text(encoding="utf-8"))
     templates = [ResidentTemplate.model_validate(r) for r in raw]
     return [

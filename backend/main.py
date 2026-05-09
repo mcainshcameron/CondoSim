@@ -190,6 +190,11 @@ async def _get_run_for_mutation(run_id: str) -> RunState:
     loop = active_loop(run_id)
     if loop is not None:
         return loop.state
+    if bus().lock(run_id).locked():
+        raise HTTPException(
+            status_code=409,
+            detail="Il giorno si sta chiudendo. Attendi la fine del consolidamento.",
+        )
     return await _get_run(run_id)
 
 
@@ -357,12 +362,11 @@ async def _run_day_bg(run_id: str, lock: asyncio.Lock) -> None:
         log("api", f"advance_day(bg) done. {new_msgs} new msgs. Now day {final_day}.")
     finally:
         # day_done is the chain trigger — frontend listens for this to
-        # schedule the next advance. Fire it BEFORE releasing the lock so
-        # a frontend POST that races with day_done won't beat the release
-        # and 409. (We publish first; subscribers receive asynchronously.)
-        bus().publish(run_id, "day_done", {"ok": success, "day": final_day})
+        # schedule the next advance. Release first so a frontend POST that
+        # races with day_done cannot hit a false 409.
         if lock.locked():
             lock.release()
+        bus().publish(run_id, "day_done", {"ok": success, "day": final_day})
 
 
 @app.post("/api/runs/{run_id}/advance_day")

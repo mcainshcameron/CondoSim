@@ -213,7 +213,7 @@ Frontend rule: `onAdvance` only kicks off the work (`api.advanceDay(id)` → 202
 ### UI
 
 - WhatsApp-style layout (topbar, left chat+resident panel, chat column, admin console for motions)
-- **Auto-advance days** with ⏸ Pausa / ▶ Riprendi toggle in the topbar and a live mm:ss timer in the topbar sub. Scheduling keyed off the `advance_day` POST response (not `day_end` SSE — see §4.7), so backend memory consolidation completes before the next day starts. Short grace delay on run load, ~3s pause between days.
+- **Auto-advance days** with ⏸ Pausa / ▶ Riprendi toggle in the topbar and a live mm:ss timer in the topbar sub. Scheduling is keyed off the `day_done` SSE event (not the `advance_day` POST response and not `day_end` — see §4.7), so backend memory consolidation completes before the next day starts. Short grace delay on run load, ~3s pause between days.
 - Left chat list scoped to admin-participating chats (main + admin DMs); inter-resident DMs surface in "DM frequenti" at the bottom and open read-only in the center column when clicked
 - Typing indicator lives in the chat header sub, not the messages list — prevents the last message from being shoved up and down as agents start/stop typing
 - Setup screen with cast preview + admin's opening-message compose
@@ -291,11 +291,11 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 **Option (not currently needed)**: re-expose strong trust signals in the prompt once the matrix has meaningful values (e.g. `|score| >= 0.3`). Deferred until we see whether MEMORY-carried relationships alone produce good enough coherence. The matrix is now observable (panel populates), so this is easy to evaluate.
 
-### 6.7 Frontend: MEMORY viewer doesn't auto-refresh
+### 6.7 ~~Frontend: MEMORY viewer doesn't auto-refresh~~ — ✅ SHIPPED
 
-**Status**: MEMORY.md viewer in profile modal has a manual refresh (↻). It doesn't auto-update when a new day's consolidation writes to the file.
+**Resolved**: the profile modal listens for `memory_consolidation_done` via the app-level SSE handler. If the MEMORY panel is open, it refetches the resident's MEMORY after each consolidation. Manual refresh remains available.
 
-**Fix direction**: listen to the `memory_consolidation_done` SSE event and auto-refetch. Trivial — 10 min.
+**Verified**: production frontend build passes after the SSE refresh wiring.
 
 ### 6.8 Single building only
 
@@ -321,12 +321,11 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 In order of user impact / effort ratio:
 
-1. **MEMORY viewer auto-refresh on SSE** (6.7) — 10 min, makes the MEMORY viewer useful during live play
-2. **Admin-goal discoverability in UI** — ensure the UI clearly shows goal state per resident and makes setting/clearing easy. User flagged this as important. Worth auditing the current AdminConsole UX.
-3. **Admin-bot for DM replies** (6.4) — 1h, removes the dead-end feel of admin DMs
-4. **Second building** (6.8) — content exercise, not code. 1h to author + 15 min for UI selector
-5. **Token/cost observability** (6.9) — 30 min, useful for long runs
-6. **Unit tests** (6.10) — 2h, pays back whenever we tune prompts again
+1. **Admin-goal discoverability in UI** — ensure the UI clearly shows goal state per resident and makes setting/clearing easy. User flagged this as important. Worth auditing the current AdminConsole UX.
+2. **Admin-bot for DM replies** (6.4) — 1h, removes the dead-end feel of admin DMs
+3. **Second building** (6.8) — content exercise, not code. 1h to author + 15 min for UI selector
+4. **Token/cost observability** (6.9) — 30 min, useful for long runs
+5. **Unit tests** (6.10) — 2h, pays back whenever we tune prompts again
 
 Recently shipped: multi-signal trust matrix (6.1).
 

@@ -23,6 +23,7 @@ All timing is fictional minutes since Day 1 00:00 — wall-clock-free.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 
 from . import memory
@@ -270,7 +271,8 @@ def _allocate_round_window(day: int, round_idx: int, total_rounds: int) -> tuple
 
 
 def _seed_for(run_id: str, day: int, round_idx: int) -> int:
-    return abs(hash((run_id, day, round_idx))) % (2**31)
+    raw = f"{run_id}:day:{day}:round:{round_idx}".encode("utf-8")
+    return int(hashlib.sha256(raw).hexdigest()[:12], 16)
 
 
 class DayLoop:
@@ -373,7 +375,7 @@ class DayLoop:
                 )
                 forced_reason = None
 
-            roll = random.random()
+            roll = rng.random()
             if forced_reason is None and roll >= prob:
                 bus().publish(self.state.run_id, "agent_skipped_turn", {
                     "agent_id": aid,

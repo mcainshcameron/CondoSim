@@ -118,6 +118,79 @@ button {
   top: 0;
   z-index: 1;
 }
+.panel-search {
+  padding: 10px 12px 8px;
+  background: var(--panel-sidebar);
+  border-bottom: 1px solid var(--border-soft);
+  position: relative;
+}
+.panel-search input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  background: #f0f2f5;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 0 34px 0 12px;
+  outline: none;
+}
+.panel-search input:focus {
+  background: white;
+  border-color: rgba(0, 128, 105, 0.45);
+  box-shadow: 0 0 0 3px rgba(0, 128, 105, 0.10);
+}
+.panel-search-clear {
+  position: absolute;
+  right: 20px;
+  top: 17px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: #d9dee2;
+  color: var(--muted);
+  line-height: 1;
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.panel-search-clear:hover {
+  background: #cfd7db;
+  color: var(--text);
+}
+.chat-filter-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 0 12px 10px;
+  background: var(--panel-sidebar);
+  border-bottom: 1px solid var(--border-soft);
+}
+.chat-filter-tabs button {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 7px 8px;
+}
+.chat-filter-tabs button:hover {
+  background: #eef2f4;
+  color: var(--text);
+}
+.chat-filter-tabs button.active {
+  background: var(--brand-light);
+  border-color: rgba(0, 128, 105, 0.18);
+  color: var(--brand-dark);
+}
 .resident-card {
   display: grid;
   grid-template-columns: 42px 1fr;
@@ -185,6 +258,13 @@ button {
   background: #eef2f4;
   color: var(--muted);
 }
+.resident-empty {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+  border-bottom: 1px solid var(--border-soft);
+}
 
 /* Chat column: [header] [messages flex] [composer] */
 .chat-col {
@@ -216,7 +296,7 @@ button {
   border-bottom: 1px solid var(--border);
   z-index: 1;
 }
-.chat-header-text { min-width: 0; }
+.chat-header-text { flex: 1; min-width: 0; }
 .chat-header-title { font-size: 14px; font-weight: 600; color: var(--text); }
 .chat-header-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
 
@@ -227,6 +307,9 @@ button {
   flex-direction: column;
   gap: 2px;
   z-index: 1;
+  scroll-behavior: smooth;
+  overflow-anchor: auto;
+  position: relative;
 }
 
 /* A message row positions bubble (+ avatar for non-self) on the correct side */
@@ -270,6 +353,30 @@ button {
   line-height: 1.4;
   white-space: pre-wrap;
   padding-right: 42px; /* leave room for inline timestamp */
+}
+.msg.has-reactions .content {
+  padding-bottom: 20px;
+}
+.msg-reactions {
+  position: absolute;
+  left: 8px;
+  bottom: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-width: calc(100% - 56px);
+}
+.msg-reaction {
+  display: inline-flex;
+  align-items: center;
+  min-height: 17px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(11, 20, 26, 0.08);
+  box-shadow: 0 1px 2px rgba(11, 20, 26, 0.08);
+  font-size: 11px;
+  line-height: 1;
 }
 .msg .ts {
   font-size: 10px;
@@ -349,6 +456,11 @@ button {
   align-items: center;
   gap: 2px;
 }
+.chat-header-queued,
+.chat-list-queued {
+  color: var(--brand);
+  font-style: italic;
+}
 .chat-header-typing .dots span {
   display: inline-block;
   animation: bounce 1.2s infinite;
@@ -362,11 +474,46 @@ button {
 }
 /* Message fade-in when it arrives via SSE */
 .msg.fade-in {
-  animation: msgIn 0.35s ease-out;
+  animation: msgIn 0.42s cubic-bezier(0.2, 0.8, 0.2, 1);
+  will-change: opacity, transform;
 }
 @keyframes msgIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  70%  { opacity: 1; transform: translateY(-1px) scale(1); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.new-message-jump {
+  position: sticky;
+  bottom: 10px;
+  align-self: center;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(18, 140, 126, 0.94);
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  margin-top: 6px;
+  animation: jumpPillIn 0.2s ease-out;
+}
+.new-message-jump:hover {
+  background: var(--brand-dark);
+}
+@keyframes jumpPillIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-messages {
+    scroll-behavior: auto;
+  }
+  .msg.fade-in,
+  .new-message-jump,
+  .day-status-bar {
+    animation: none;
+  }
 }
 
 /* Day status bar */
@@ -1568,6 +1715,7 @@ button {
   border-bottom: 1px solid var(--border-soft);
   transition: background 0.12s;
   min-width: 0;
+  position: relative;
 }
 .chat-list-row:hover { background: #f0f2f5; }
 .chat-list-row.active { background: #e8f5ef; }
@@ -1575,6 +1723,12 @@ button {
   /* Left accent bar on active chat */
   content: '';
   position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--brand);
 }
 .chat-list-main { min-width: 0; }
 .chat-list-top {
@@ -1746,10 +1900,33 @@ button {
   background: #b9c4be;
   cursor: not-allowed;
 }
+.chat-composer-meta {
+  min-height: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
 .chat-composer-error {
   font-size: 11px;
   color: var(--danger);
-  padding: 2px 8px;
+  padding: 0 8px;
+}
+.chat-composer-error:empty {
+  display: none;
+}
+.chat-composer-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.chat-composer-count.warn {
+  color: #8a6d00;
+}
+.chat-composer-count.over {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 /* Clickable chat header (opens profile on DMs) */

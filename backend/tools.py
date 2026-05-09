@@ -403,18 +403,20 @@ def _tokens(s: str) -> set[str]:
     return out
 
 
-def _last_message_in_chat(state: RunState, chat_id: str) -> Message | None:
+def _last_message_in_chat(state: RunState, chat_id: str, now: int | None = None) -> Message | None:
     """Most recent (by fictional time) message in a chat, or None if empty."""
     best = None
     for m in state.messages:
         if m.chat_id != chat_id:
+            continue
+        if now is not None and m.fictional_timestamp_minutes > now:
             continue
         if best is None or m.fictional_timestamp_minutes > best.fictional_timestamp_minutes:
             best = m
     return best
 
 
-def _dm_cooldown_active(state: RunState, chat: Chat, sender_id: str) -> bool:
+def _dm_cooldown_active(state: RunState, chat: Chat, sender_id: str, now: int) -> bool:
     """In a DM, refuse a follow-up send if the partner hasn't replied and the
     previous send from this agent was less than DM_REPLY_COOLDOWN_MIN fictional
     minutes ago. After the cooldown elapses, the agent can chase; within it,
@@ -423,10 +425,10 @@ def _dm_cooldown_active(state: RunState, chat: Chat, sender_id: str) -> bool:
     spam."""
     if chat.kind != "dm":
         return False
-    last = _last_message_in_chat(state, chat.id)
+    last = _last_message_in_chat(state, chat.id, now=now)
     if last is None or last.sender_id != sender_id:
         return False
-    elapsed = state.clock.minutes_since_start - last.fictional_timestamp_minutes
+    elapsed = now - last.fictional_timestamp_minutes
     return elapsed < DM_REPLY_COOLDOWN_MIN
 
 
@@ -577,7 +579,7 @@ def tool_send_message(ctx: ToolContext, chat_id: str, text: str) -> str:
             f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
             f"di persona — solo chat. Metti giù il telefono."
         )
-    if _dm_cooldown_active(state, chat, ctx.agent_id):
+    if _dm_cooldown_active(state, chat, ctx.agent_id, ctx.current_fictional_minutes):
         return (
             f"Hai scritto da poco in questa chat privata e non ti hanno ancora "
             f"risposto. Dagli qualche ora prima di riscrivere — se hai altro da "
@@ -645,7 +647,7 @@ def tool_send_dm(ctx: ToolContext, recipient_id: str, text: str) -> str:
             f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
             f"di persona — solo chat. Metti giù il telefono."
         )
-    if _dm_cooldown_active(state, dm_chat, ctx.agent_id):
+    if _dm_cooldown_active(state, dm_chat, ctx.agent_id, ctx.current_fictional_minutes):
         return (
             f"Hai scritto da poco a {_display_for(state, recipient_id)} e non ti "
             f"hanno ancora risposto. Dagli qualche ora prima di riscrivere — se hai "
@@ -654,7 +656,7 @@ def tool_send_dm(ctx: ToolContext, recipient_id: str, text: str) -> str:
 
     # Detect reply-to-partner BEFORE the send: if the current last message in
     # this DM is from the recipient, this send closes the turn → +trust.
-    last = _last_message_in_chat(state, dm_chat.id)
+    last = _last_message_in_chat(state, dm_chat.id, now=ctx.current_fictional_minutes)
     is_reply_to_partner = last is not None and last.sender_id == recipient_id
 
     msg = _create_and_append_message(ctx, dm_chat, ctx.agent_id, text)
@@ -692,6 +694,24 @@ def tool_propose_motion(ctx: ToolContext, title: str, description: str) -> str:
     description = (description or "").strip()
     if not title or not description:
         return "Serve sia un titolo che una descrizione per depositare una mozione."
+    combined = f"{title}\n{description}"
+    hit = contains_forbidden(combined)
+    if hit is not None:
+        ctx.blocked_sends.append({"tool": "propose_motion", "text": combined, "hit": hit})
+        return "Mozione non depositata: riscrivila senza uscire dal tono normale della chat condominiale."
+    rule = _content_rule_violation(combined)
+    if rule is not None:
+        category, phrase = rule
+        ctx.done = True
+        if category == "phone_fiction":
+            return (
+                f"Non depositare questa mozione: contiene \"{phrase}\", che Ã¨ una bugia "
+                f"(le chat funzionano sempre). Metti giÃ¹ il telefono."
+            )
+        return (
+            f"Non depositare questa mozione: contiene \"{phrase}\". Il condominio esiste "
+            f"solo in chat. Metti giÃ¹ il telefono."
+        )
     agent = next(a for a in state.agents if a.persona.id == ctx.agent_id)
     motion = Motion(
         id=f"m_{uuid4().hex[:8]}",
@@ -802,7 +822,12 @@ def tool_vote(ctx: ToolContext, motion_id: str, choice: str) -> str:
     return f"Voto registrato: {label} sulla mozione \"{motion.title}\"."
 
 
-def _find_message_in_chat_by_excerpt(state: RunState, chat_id: str, excerpt: str) -> Message | None:
+def _find_message_in_chat_by_excerpt(
+    state: RunState,
+    chat_id: str,
+    excerpt: str,
+    now: int | None = None,
+) -> Message | None:
     """Locate a recent message in a chat whose content matches excerpt.
 
     Tries exact-substring first, then word-overlap fallback. Most recent wins.
@@ -811,7 +836,11 @@ def _find_message_in_chat_by_excerpt(state: RunState, chat_id: str, excerpt: str
         return None
     ex = excerpt.lower().strip()
     ex_tokens = _tokens(ex)
-    candidates = [m for m in state.messages if m.chat_id == chat_id]
+    candidates = [
+        m for m in state.messages
+        if m.chat_id == chat_id and (now is None or m.fictional_timestamp_minutes <= now)
+    ]
+    candidates.sort(key=lambda m: (m.fictional_timestamp_minutes, m.wall_clock_iso, m.id))
     # Prefer exact substring match
     for m in reversed(candidates):
         if ex in m.content.lower():
@@ -819,7 +848,7 @@ def _find_message_in_chat_by_excerpt(state: RunState, chat_id: str, excerpt: str
     # Fallback: best word-overlap
     best: Message | None = None
     best_score = 0.0
-    for m in candidates:
+    for m in reversed(candidates):
         m_tokens = _tokens(m.content)
         if not m_tokens or not ex_tokens:
             continue
@@ -839,7 +868,9 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
         return f"Non trovo la chat \"{source_chat}\" da cui vuoi inoltrare."
     if not _is_member(source, ctx.agent_id):
         return "Non puoi inoltrare da una chat di cui non fai parte."
-    orig = _find_message_in_chat_by_excerpt(state, source.id, message_excerpt)
+    orig = _find_message_in_chat_by_excerpt(
+        state, source.id, message_excerpt, now=ctx.current_fictional_minutes
+    )
     if orig is None:
         return (
             f"Non trovo un messaggio in \"{source.display_name}\" che corrisponda a "
@@ -884,7 +915,7 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
         return "Non puoi inoltrare in una chat di cui non fai parte."
 
     # DM cooldown guard also applies to forwards
-    if _dm_cooldown_active(state, target_chat, ctx.agent_id):
+    if _dm_cooldown_active(state, target_chat, ctx.agent_id, ctx.current_fictional_minutes):
         return (
             f"Hai scritto da poco in questa chat e non ti hanno ancora risposto. "
             f"Aspetta qualche ora prima di inoltrare altro."
@@ -903,6 +934,19 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
     if contains_forbidden(body):
         ctx.blocked_sends.append({"chat_id": target_chat.id, "text": body, "hit": "forbidden"})
         return "Non inoltrare questo messaggio, scegli un modo diverso."
+    rule = _content_rule_violation(body)
+    if rule is not None:
+        category, phrase = rule
+        ctx.done = True
+        if category == "phone_fiction":
+            return (
+                f"Non inoltrare questo messaggio: contiene \"{phrase}\", che Ã¨ una bugia "
+                f"(le chat funzionano sempre). Metti giÃ¹ il telefono."
+            )
+        return (
+            f"Non inoltrare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
+            f"di persona â€” solo chat. Metti giÃ¹ il telefono."
+        )
 
     # Build message with forward metadata
     state.clock.minutes_since_start = max(state.clock.minutes_since_start, ctx.current_fictional_minutes)
@@ -947,7 +991,9 @@ def tool_react_to_message(ctx: ToolContext, chat: str, message_excerpt: str, emo
         return f"Non trovo la chat \"{chat}\"."
     if not _is_member(target_chat, ctx.agent_id):
         return "Non fai parte di questa chat."
-    msg = _find_message_in_chat_by_excerpt(state, target_chat.id, message_excerpt)
+    msg = _find_message_in_chat_by_excerpt(
+        state, target_chat.id, message_excerpt, now=ctx.current_fictional_minutes
+    )
     if msg is None:
         return "Non trovo il messaggio a cui vuoi reagire."
     emoji = (emoji or "").strip()
@@ -955,8 +1001,9 @@ def tool_react_to_message(ctx: ToolContext, chat: str, message_excerpt: str, emo
         return f"Usa una di queste reazioni: {' '.join(ALLOWED_REACTION_EMOJI)}."
     # Add reaction, avoiding duplicate reactions from same agent
     bucket = msg.reactions.setdefault(emoji, [])
-    if ctx.agent_id not in bucket:
-        bucket.append(ctx.agent_id)
+    if ctx.agent_id in bucket:
+        return f"Hai giÃ  reagito a quel messaggio con {emoji}."
+    bucket.append(ctx.agent_id)
     ctx.reactions_added_this_activation.append((msg.id, emoji))
     from .events import bus
     bus().publish(state.run_id, "reaction_added", {

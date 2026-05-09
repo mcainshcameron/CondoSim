@@ -12,9 +12,28 @@ const BACKEND = apiBase;
 // (1–4 fic min within an activation, 5–360 between activations), so we
 // honour it. Bursts feel rapid, lulls breathe. Admin sends still render
 // instantly. Floor + cap keep both extremes humane.
-const REAL_MS_PER_FIC_MIN = 400;
-const MIN_RENDER_GAP_MS = 2500;
-const MAX_RENDER_GAP_MS = 8000;
+const REAL_MS_PER_FIC_MIN = 300;
+const MIN_RENDER_GAP_MS = 1400;
+const MAX_RENDER_GAP_MS = 6500;
+
+function compareMessages(a, b) {
+  if (a.fictional_timestamp_minutes !== b.fictional_timestamp_minutes) {
+    return a.fictional_timestamp_minutes - b.fictional_timestamp_minutes;
+  }
+  if (a.wall_clock_iso && b.wall_clock_iso && a.wall_clock_iso !== b.wall_clock_iso) {
+    return String(a.wall_clock_iso).localeCompare(String(b.wall_clock_iso));
+  }
+  return String(a.id || '').localeCompare(String(b.id || ''));
+}
+
+function mergeMessagesChronologically(existing, incoming) {
+  const byId = new Map((existing || []).map(m => [m.id, m]));
+  for (const msg of incoming || []) {
+    if (!msg?.id) continue;
+    byId.set(msg.id, { ...(byId.get(msg.id) || {}), ...msg });
+  }
+  return Array.from(byId.values()).sort(compareMessages);
+}
 
 function formatItalianDateTime(fictionalStartIso, minutesSinceStart) {
   const base = new Date(fictionalStartIso);
@@ -286,7 +305,7 @@ const OWNER_KIND_LABEL = {
   commercial_stake: 'Rappresenta un interesse commerciale',
 };
 
-function ProfileModal({ state, agentId, onClose, onOpenChat, onGoalSaved }) {
+function ProfileModal({ state, agentId, onClose, onOpenChat, onGoalSaved, memoryRefreshSeq }) {
   const agent = state.agents.find(a => a.persona.id === agentId);
   const [goalDraft, setGoalDraft] = useState(agent?.admin_goal || '');
   const [goalSaving, setGoalSaving] = useState(false);
@@ -295,6 +314,7 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, onGoalSaved }) {
   const [memoryText, setMemoryText] = useState(null);
   const [showSoul, setShowSoul] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const lastMemoryRefreshSeqRef = useRef(memoryRefreshSeq);
 
   useEffect(() => {
     setGoalDraft(agent?.admin_goal || '');
@@ -303,6 +323,7 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, onGoalSaved }) {
     setMemoryText(null);
     setShowSoul(false);
     setShowMemory(false);
+    lastMemoryRefreshSeqRef.current = memoryRefreshSeq;
   }, [agent?.admin_goal, agentId]);
 
   const toggleSoul = async () => {
@@ -331,14 +352,21 @@ function ProfileModal({ state, agentId, onClose, onOpenChat, onGoalSaved }) {
     }
   };
 
-  const refreshMemory = async () => {
+  const refreshMemory = useCallback(async () => {
     try {
       const { content } = await api.getAgentMemory(state.run_id, agentId);
       setMemoryText(content || '(vuoto)');
     } catch (e) {
       setMemoryText('Errore nel caricamento: ' + String(e));
     }
-  };
+  }, [state.run_id, agentId]);
+
+  useEffect(() => {
+    if (!showMemory || memoryText === null) return;
+    if (memoryRefreshSeq <= lastMemoryRefreshSeqRef.current) return;
+    lastMemoryRefreshSeqRef.current = memoryRefreshSeq;
+    refreshMemory();
+  }, [memoryRefreshSeq, memoryText, refreshMemory, showMemory]);
 
   if (!agent) return null;
   const p = agent.persona;
@@ -557,6 +585,10 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
 }
 
+function searchText(...parts) {
+  return parts.filter(Boolean).join(' ').toLowerCase();
+}
+
 function runPulse(state) {
   const day = state.clock?.day || 1;
   const todayMessages = state.messages.filter(m => m.day === day);
@@ -601,7 +633,10 @@ function residentStatusTags(state, agent) {
   return tags.slice(0, 3);
 }
 
-function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, onOpenProfile }) {
+function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, queuedByChat, onOpenProfile }) {
+  const [panelQuery, setPanelQuery] = useState('');
+  const [chatFilter, setChatFilter] = useState('all');
+
   // Compute DM partner counts + trust edges from current state
   const nameById = useMemo(() => {
     const m = {};
@@ -609,6 +644,7 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
     m['admin'] = 'Amministratore';
     return m;
   }, [state.agents]);
+  const normalizedQuery = panelQuery.trim().toLowerCase();
 
   // Chat list shows only admin-participating conversations (group + admin DMs).
   // Inter-resident DMs live in the "DM frequenti" section below and open in
@@ -644,6 +680,32 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
       return bt - at;
     });
   }, [visibleChats, lastMsgByChat]);
+
+  const filteredChatListItems = useMemo(() => {
+    return chatListItems.filter(({ chat, last }) => {
+      if (chatFilter === 'unread' && !(unreadByChat?.[chat.id] > 0)) return false;
+      if (chatFilter === 'dm' && chat.kind !== 'dm') return false;
+      if (!normalizedQuery) return true;
+      const memberNames = (chat.member_ids || []).map(id => nameById[id] || id).join(' ');
+      return searchText(
+        chat.display_name,
+        memberNames,
+        last?.sender_display_name,
+        last?.content,
+      ).includes(normalizedQuery);
+    });
+  }, [chatListItems, chatFilter, nameById, normalizedQuery, unreadByChat]);
+
+  const filteredAgents = useMemo(() => {
+    if (!normalizedQuery) return state.agents;
+    return state.agents.filter(a => searchText(
+      a.persona.display_name,
+      a.persona.unit,
+      a.persona.public_description,
+      a.persona.responsiveness,
+      a.persona.time_of_day,
+    ).includes(normalizedQuery));
+  }, [normalizedQuery, state.agents]);
 
   // DM pair counts (bidirectional)
   const dmCounts = useMemo(() => {
@@ -707,13 +769,49 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
   return (
     <div className="panel">
       <div className="panel-title">Chat</div>
-      <div className="chat-list">
-        {chatListItems.length === 0 && (
-          <div className="chat-list-empty">Nessuna chat ancora.</div>
+      <div className="panel-search">
+        <input
+          type="search"
+          value={panelQuery}
+          onChange={e => setPanelQuery(e.target.value)}
+          placeholder="Cerca chat o residenti"
+          aria-label="Cerca chat o residenti"
+        />
+        {panelQuery && (
+          <button
+            type="button"
+            className="panel-search-clear"
+            onClick={() => setPanelQuery('')}
+            aria-label="Cancella ricerca"
+            title="Cancella"
+          >×</button>
         )}
-        {chatListItems.map(({ chat, last }) => {
+      </div>
+      <div className="chat-filter-tabs" role="tablist" aria-label="Filtro chat">
+        <button
+          type="button"
+          className={chatFilter === 'all' ? 'active' : ''}
+          onClick={() => setChatFilter('all')}
+        >Tutte</button>
+        <button
+          type="button"
+          className={chatFilter === 'unread' ? 'active' : ''}
+          onClick={() => setChatFilter('unread')}
+        >Non lette</button>
+        <button
+          type="button"
+          className={chatFilter === 'dm' ? 'active' : ''}
+          onClick={() => setChatFilter('dm')}
+        >DM</button>
+      </div>
+      <div className="chat-list">
+        {filteredChatListItems.length === 0 && (
+          <div className="chat-list-empty">Nessuna chat corrispondente.</div>
+        )}
+        {filteredChatListItems.map(({ chat, last }) => {
           const unread = unreadByChat?.[chat.id] || 0;
           const typing = (typingByChat?.[chat.id] || []).length > 0;
+          const queued = (queuedByChat?.[chat.id] || []).length > 0;
           const isActive = chat.id === selectedChatId;
           const isGroup = chat.kind === 'main' || chat.kind === 'assembly';
           const lastSender = last?.sender_kind === 'admin'
@@ -745,7 +843,9 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
                   <span className="chat-list-preview">
                     {typing
                       ? <span className="chat-list-typing">sta scrivendo…</span>
-                      : truncate(previewText, 48)}
+                      : queued
+                        ? <span className="chat-list-queued">in arrivo...</span>
+                        : truncate(previewText, 48)}
                   </span>
                   {unread > 0 && <span className="chat-list-unread">{unread}</span>}
                 </div>
@@ -756,7 +856,10 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
       </div>
 
       <div className="panel-title">Residenti</div>
-      {state.agents.map(a => {
+      {filteredAgents.length === 0 && (
+        <div className="resident-empty">Nessun residente corrispondente.</div>
+      )}
+      {filteredAgents.map(a => {
         const msgsToday = state.messages.filter(m => m.sender_id === a.persona.id && m.day === state.clock.day).length;
         const chatId = findChatForResident(state, a.persona.id);
         const tags = residentStatusTags(state, a);
@@ -860,12 +963,21 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const textareaRef = useRef(null);
+  const softLimit = 700;
 
   // Clear composer state whenever the active chat changes.
   useEffect(() => {
     setText('');
     setError('');
   }, [chat?.id]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }, [text, chat?.id]);
 
   if (!chat) return null;
 
@@ -888,6 +1000,11 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
   }
 
   const canSend = mode !== 'disabled' && text.trim() && !sending;
+  const countState = text.length > softLimit
+    ? 'over'
+    : text.length > softLimit * 0.8
+      ? 'warn'
+      : '';
 
   const handleSend = async () => {
     if (!canSend) return;
@@ -920,7 +1037,7 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
       {label && (
         <div className="chat-composer-label">
           <span>{label}</span>
-          <span className="chat-composer-hint">⌘↵ per inviare</span>
+          <span className="chat-composer-hint dynamic">Ctrl+Enter per inviare</span>
         </div>
       )}
       {speedChips.length > 0 && (
@@ -938,6 +1055,7 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
       )}
       <div className="chat-composer-row">
         <textarea
+          ref={textareaRef}
           className="chat-composer-input"
           placeholder={placeholder}
           value={text}
@@ -955,12 +1073,21 @@ function ChatComposer({ state, chat, suggestions, onSendAnnounce, onSendDm }) {
           {sending ? '…' : '➤'}
         </button>
       </div>
-      {error && <div className="chat-composer-error">{error}</div>}
+      {(error || text.length > 0) && (
+        <div className="chat-composer-meta">
+          <span className="chat-composer-error">{error}</span>
+          {text.length > 0 && (
+            <span className={`chat-composer-count ${countState}`}>
+              {text.length}/{softLimit}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggestions, onSendAnnounce, onSendDm, onOpenProfile, onMobileBack, onOpenConsole }) {
+function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, queuedByChat, suggestions, onSendAnnounce, onSendDm, onOpenProfile, onMobileBack, onOpenConsole }) {
   const chats = state.chats;
   const msgsByChat = useMemo(() => {
     const m = new Map();
@@ -968,7 +1095,7 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggesti
     for (const msg of state.messages) {
       if (m.has(msg.chat_id)) m.get(msg.chat_id).push(msg);
     }
-    for (const arr of m.values()) arr.sort((a, b) => a.fictional_timestamp_minutes - b.fictional_timestamp_minutes);
+    for (const arr of m.values()) arr.sort(compareMessages);
     return m;
   }, [state, chats]);
 
@@ -976,19 +1103,61 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggesti
   const selected = chats.find(c => c.id === selectedChatId) || pendingChat || chats[0];
   const selectedMsgs = (selected && !selected._pending) ? (msgsByChat.get(selected.id) || []) : [];
   const scrollRef = useRef(null);
+  const pinnedToBottomRef = useRef(true);
+  const previousChatIdRef = useRef(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   const typingNames = selected ? (typingByChat[selected.id] || []) : [];
+  const queuedNames = selected ? (queuedByChat?.[selected.id] || []) : [];
+  const nameById = useMemo(() => {
+    const out = { admin: 'Amministratore' };
+    for (const a of state.agents) out[a.persona.id] = a.persona.display_name;
+    return out;
+  }, [state.agents]);
 
-  // Auto-scroll to bottom on new messages / chat switch. The typing indicator
-  // lives in the header now, so it no longer perturbs message layout.
+  const scrollToLatest = useCallback((behavior = 'smooth') => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
+    pinnedToBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }, []);
+
+  const onMessageScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    pinnedToBottomRef.current = nearBottom;
+    if (nearBottom) setShowJumpToLatest(false);
+  }, []);
+
+  // Auto-scroll only when the user is already reading the latest messages.
+  // If they scrolled up, preserve their place and offer a small jump button.
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [selectedMsgs.length, selected?.id]);
+    if (!el) return;
+    const chatChanged = previousChatIdRef.current !== selected?.id;
+    previousChatIdRef.current = selected?.id;
+    if (chatChanged) {
+      requestAnimationFrame(() => scrollToLatest('auto'));
+      return;
+    }
+    if (pinnedToBottomRef.current) {
+      requestAnimationFrame(() => scrollToLatest('smooth'));
+    } else {
+      setShowJumpToLatest(true);
+    }
+  }, [selectedMsgs.length, selected?.id, scrollToLatest]);
 
   // Build a WhatsApp-style chat header line for the current chat.
   const chatHeader = useMemo(() => {
     if (!selected) return null;
+    const todayCount = selectedMsgs.filter(m => m.day === state.clock.day).length;
+    const msgMeta = todayCount > 0
+      ? `${todayCount} msg oggi`
+      : selectedMsgs.length > 0
+        ? `${selectedMsgs.length} msg totali`
+        : 'nessun messaggio';
     const otherNames = (selected.member_ids || [])
       .filter(id => id !== 'admin')
       .map(id => {
@@ -996,13 +1165,13 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggesti
         return a?.persona.display_name || id;
       });
     if (selected.kind === 'main' || selected.kind === 'assembly') {
-      return { title: selected.display_name, sub: `${otherNames.length} residenti · gruppo condominiale` };
+      return { title: selected.display_name, sub: `${otherNames.length} residenti - ${msgMeta}` };
     }
     if (selected.kind === 'dm') {
-      return { title: selected.display_name, sub: 'Messaggio privato' };
+      return { title: selected.display_name, sub: `Messaggio privato - ${msgMeta}` };
     }
     return { title: selected.display_name, sub: '' };
-  }, [selected, state.agents]);
+  }, [selected, selectedMsgs, state.agents, state.clock.day]);
 
   // Build render items with date separators between days.
   const renderedItems = useMemo(() => {
@@ -1055,6 +1224,12 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggesti
                       : `${typingNames.length} stanno scrivendo`}
                   <span className="dots"><span>.</span><span>.</span><span>.</span></span>
                 </span>
+              ) : queuedNames.length > 0 ? (
+                <span className="chat-header-queued">
+                  {queuedNames.length === 1
+                    ? `${queuedNames[0]} sta inviando...`
+                    : `${queuedNames.length} messaggi in arrivo...`}
+                </span>
               ) : chatHeader.sub}
             </div>
           </div>
@@ -1069,7 +1244,7 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggesti
           )}
         </div>
       )}
-      <div className="chat-messages" ref={scrollRef}>
+      <div className="chat-messages" ref={scrollRef} onScroll={onMessageScroll}>
         {renderedItems.length === 0 ? (
           <div className="chat-empty">
             <div className="chat-empty-icon">💬</div>
@@ -1102,6 +1277,8 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggesti
               && (m.fictional_timestamp_minutes - prev.fictional_timestamp_minutes) < 10;
             const ts = formatItalianDateTime(state.fictional_start_iso, m.fictional_timestamp_minutes)
               .split(', ')[1] || '';
+            const reactionEntries = Object.entries(m.reactions || {})
+              .filter(([, ids]) => Array.isArray(ids) && ids.length > 0);
             return (
               <div
                 key={m.id}
@@ -1118,16 +1295,38 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, suggesti
                     )}
                   </div>
                 )}
-                <div className={`msg ${kindClass}`}>
+                <div className={`msg ${kindClass} ${reactionEntries.length ? 'has-reactions' : ''}`}>
                   {!sameAsPrev && !isSelf && (
                     <div className="sender">{m.sender_display_name}</div>
                   )}
                   <div className="content">{m.content}</div>
+                  {reactionEntries.length > 0 && (
+                    <div className="msg-reactions">
+                      {reactionEntries.map(([emoji, ids]) => (
+                        <span
+                          key={emoji}
+                          className="msg-reaction"
+                          title={ids.map(id => nameById[id] || id).join(', ')}
+                        >
+                          {emoji}{ids.length > 1 ? ` ${ids.length}` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className="ts">{ts}</div>
                 </div>
               </div>
             );
           })
+        )}
+        {showJumpToLatest && (
+          <button
+            type="button"
+            className="new-message-jump"
+            onClick={() => scrollToLatest('smooth')}
+          >
+            Nuovi messaggi
+          </button>
         )}
       </div>
       <ChatComposer
@@ -1397,6 +1596,8 @@ export default function App() {
   const [lastDayStats, setLastDayStats] = useState(null);
   const [profileAgentId, setProfileAgentId] = useState(null);
   const [unreadByChat, setUnreadByChat] = useState({});
+  const [queuedMessages, setQueuedMessages] = useState([]);
+  const [memoryRefreshSeq, setMemoryRefreshSeq] = useState(0);
   const [suggestions, setSuggestions] = useState([]);
   // A transient "chat doesn't exist yet" placeholder, used when the admin
   // wants to DM a resident they've never messaged before. Cleared once the
@@ -1426,6 +1627,22 @@ export default function App() {
   // breathe — instead of pacing every message at a fixed cadence.
   const nextRenderSlotRef = useRef(0);
   const lastRenderedFicMinRef = useRef(null);
+  const renderTimersRef = useRef(new Set());
+  const queuedMessagesRef = useRef([]);
+  useEffect(() => { queuedMessagesRef.current = queuedMessages; }, [queuedMessages]);
+
+  useEffect(() => {
+    return () => {
+      for (const id of renderTimersRef.current) clearTimeout(id);
+      renderTimersRef.current.clear();
+    };
+  }, [state?.run_id]);
+
+  useEffect(() => {
+    setQueuedMessages([]);
+    nextRenderSlotRef.current = 0;
+    lastRenderedFicMinRef.current = null;
+  }, [state?.run_id]);
 
   // Watchdog: while a day is in progress, poll the API every 5s and merge
   // anything we don't yet have. SSE is the fast path, but it dies silently
@@ -1441,16 +1658,15 @@ export default function App() {
         setState(prev => {
           if (!prev) return fresh;
           const have = new Set(prev.messages.map(m => m.id));
-          const extras = fresh.messages.filter(m => !have.has(m.id));
+          const queuedIds = new Set(queuedMessagesRef.current.map(q => q.id));
+          const extras = fresh.messages.filter(m => !have.has(m.id) && !queuedIds.has(m.id));
           const motionsChanged =
             (prev.motions?.length || 0) !== (fresh.motions?.length || 0);
           const clockChanged =
             prev.clock.minutes_since_start !== fresh.clock.minutes_since_start;
           if (extras.length === 0 && !motionsChanged && !clockChanged) return prev;
           const merged = extras.length
-            ? [...prev.messages, ...extras].sort(
-                (a, b) => a.fictional_timestamp_minutes - b.fictional_timestamp_minutes
-              )
+            ? mergeMessagesChronologically(prev.messages, extras)
             : prev.messages;
           return { ...fresh, messages: merged };
         });
@@ -1599,11 +1815,11 @@ export default function App() {
       api.getRun(runId).then(fresh => {
         setState(prev => {
           if (!prev) return fresh;
-          const byId = new Map(fresh.messages.map(m => [m.id, m]));
-          for (const m of prev.messages) if (!byId.has(m.id)) byId.set(m.id, m);
-          return { ...fresh, messages: Array.from(byId.values()).sort(
-            (a, b) => a.fictional_timestamp_minutes - b.fictional_timestamp_minutes
-          ) };
+          const queuedIds = new Set(queuedMessagesRef.current.map(q => q.id));
+          const visibleFresh = fresh.messages.filter(m =>
+            !queuedIds.has(m.id) || prev.messages.some(pm => pm.id === m.id)
+          );
+          return { ...fresh, messages: mergeMessagesChronologically(prev.messages, visibleFresh) };
         });
       }).catch(() => {});
     };
@@ -1616,6 +1832,7 @@ export default function App() {
     const renderIncomingMessage = (payload) => {
       const msg = payload.message;
       let isNewToState = false;
+      setQueuedMessages(prev => prev.filter(q => q.id !== msg.id));
       setState(prev => {
         if (!prev) return prev;
         if (prev.messages.some(m => m.id === msg.id)) return prev;
@@ -1623,7 +1840,7 @@ export default function App() {
         const chats = payload.chat && !prev.chats.some(c => c.id === payload.chat.id)
           ? [...prev.chats, payload.chat]
           : prev.chats;
-        return { ...prev, messages: [...prev.messages, { ...msg, isNew: true }], chats };
+        return { ...prev, messages: mergeMessagesChronologically(prev.messages, [{ ...msg, isNew: true }]), chats };
       });
       if (isNewToState
           && msg.sender_kind !== 'admin'
@@ -1677,7 +1894,21 @@ export default function App() {
         if (delay <= 0) {
           renderIncomingMessage(payload);
         } else {
-          setTimeout(() => renderIncomingMessage(payload), delay);
+          setQueuedMessages(prev => {
+            if (prev.some(q => q.id === msg.id)) return prev;
+            return [...prev, {
+              id: msg.id,
+              chat_id: msg.chat_id,
+              sender_id: msg.sender_id,
+              display_name: msg.sender_display_name,
+              render_at: renderAt,
+            }];
+          });
+          const timerId = setTimeout(() => {
+            renderTimersRef.current.delete(timerId);
+            renderIncomingMessage(payload);
+          }, delay);
+          renderTimersRef.current.add(timerId);
         }
       });
 
@@ -1724,9 +1955,11 @@ export default function App() {
         api.getRun(runId).then(fresh => {
           setState(prev => {
             if (!prev) return fresh;
-            const seen = new Set(fresh.messages.map(m => m.id));
-            const extras = prev.messages.filter(m => !seen.has(m.id));
-            return { ...fresh, messages: [...fresh.messages, ...extras] };
+            const queuedIds = new Set(queuedMessagesRef.current.map(q => q.id));
+            const visibleFresh = fresh.messages.filter(m =>
+              !queuedIds.has(m.id) || prev.messages.some(pm => pm.id === m.id)
+            );
+            return { ...fresh, messages: mergeMessagesChronologically(prev.messages, visibleFresh) };
           });
           if (!d.ok) {
             setDayError('Errore: il giorno non è terminato correttamente.');
@@ -1771,8 +2004,32 @@ export default function App() {
         });
         // Pull fresh state (trust matrix + dials updated server-side)
         api.getRun(runId).then(fresh => {
-          setState(prev => prev ? { ...fresh, messages: prev.messages } : fresh);
+          setState(prev => {
+            if (!prev) return fresh;
+            const queuedIds = new Set(queuedMessagesRef.current.map(q => q.id));
+            const visibleFresh = fresh.messages.filter(m =>
+              !queuedIds.has(m.id) || prev.messages.some(pm => pm.id === m.id)
+            );
+            return { ...fresh, messages: mergeMessagesChronologically(prev.messages, visibleFresh) };
+          });
         }).catch(() => {});
+      });
+
+      es.addEventListener('reaction_added', (e) => {
+        const d = JSON.parse(e.data).data;
+        setState(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            messages: prev.messages.map(m =>
+              m.id === d.message_id ? { ...m, reactions: d.reactions || {} } : m
+            ),
+          };
+        });
+      });
+
+      es.addEventListener('memory_consolidation_done', () => {
+        setMemoryRefreshSeq(n => n + 1);
       });
 
       es.addEventListener('trust_updated', () => {
@@ -1823,6 +2080,16 @@ export default function App() {
     const names = Object.values(typingAgents);
     return names.length > 0 ? { main: names } : {};
   }, [typingAgents]);
+
+  const queuedByChat = useMemo(() => {
+    const out = {};
+    for (const q of queuedMessages) {
+      if (!q.chat_id) continue;
+      if (!out[q.chat_id]) out[q.chat_id] = [];
+      out[q.chat_id].push(q.display_name || 'Qualcuno');
+    }
+    return out;
+  }, [queuedMessages]);
 
   const onAdvance = useCallback(async () => {
     if (!state || working) return;
@@ -1884,7 +2151,7 @@ export default function App() {
       const chats = chat && !prev.chats.some(c => c.id === chat.id)
         ? [...prev.chats, chat]
         : prev.chats;
-      return { ...prev, messages: [...prev.messages, msg], chats };
+      return { ...prev, messages: mergeMessagesChronologically(prev.messages, [msg]), chats };
     });
   }, []);
 
@@ -2024,6 +2291,7 @@ export default function App() {
           onStartDm={handleStartDm}
           unreadByChat={unreadByChat}
           typingByChat={typingByChat}
+          queuedByChat={queuedByChat}
           onOpenProfile={setProfileAgentId}
         />
         <ChatColumn
@@ -2031,6 +2299,7 @@ export default function App() {
           selectedChatId={selectedChatId}
           pendingChat={pendingDmChat}
           typingByChat={typingByChat}
+          queuedByChat={queuedByChat}
           suggestions={suggestions}
           onSendAnnounce={onSendAnnounce}
           onSendDm={onSendDm}
@@ -2063,6 +2332,7 @@ export default function App() {
               ),
             } : prev);
           }}
+          memoryRefreshSeq={memoryRefreshSeq}
         />
       )}
     </div>

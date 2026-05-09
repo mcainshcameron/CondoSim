@@ -32,6 +32,7 @@ export const api = {
     body: JSON.stringify({ opening_text: opening_text ?? null }),
   }),
   defaultOpening: () => req('/api/default_opening'),
+  openingTemplates: () => req('/api/opening_templates'),
   getRun: (id) => req(`/api/runs/${id}`),
   advanceDay: (id) => req(`/api/runs/${id}/advance_day`, { method: 'POST' }),
   announce: (id, text) =>

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "rain_courtyard",
+    "text": "Avviso di bacheca: ha piovuto forte tutta la notte e nel cortile interno ci sono alcune pozze vicino ai box."
+  },
+  {
+    "id": "elevator_noise",
+    "text": "Avviso di bacheca: l'ascensore fa un rumore metallico in partenza. Il manutentore e' stato avvisato."
+  },
+  {
+    "id": "mail_missing",
+    "text": "Avviso di bacheca: diversi condomini hanno segnalato posta lasciata fuori dalle cassette invece che dentro."
+  },
+  {
+    "id": "water_pressure",
+    "text": "Avviso di bacheca: pressione dell'acqua bassa tra le 07:30 e le 08:15, poi tornata normale."
+  },
+  {
+    "id": "contractor_delay",
+    "text": "Avviso di bacheca: il tecnico atteso in mattinata ha comunicato un ritardo e passera' nel pomeriggio."
+  },
+  {
+    "id": "garage_gate",
+    "text": "Avviso di bacheca: il cancello dei garage si e' bloccato due volte ieri sera, poi e' ripartito."
+  },
+  {
+    "id": "stairwell_light",
+    "text": "Avviso di bacheca: luce bruciata tra il quarto e il quinto piano. Segnalazione inviata all'elettricista."
+  },
+  {
+    "id": "trash_room",
+    "text": "Avviso di bacheca: nel locale rifiuti sono stati lasciati cartoni non piegati e sacchi fuori dai bidoni."
+  },
+  {
+    "id": "neighbor_building",
+    "text": "Avviso di bacheca: nel palazzo accanto iniziano piccoli lavori di facciata, possibile rumore tra le 09:00 e le 12:00."
+  },
+  {
+    "id": "intercom_fault",
+    "text": "Avviso di bacheca: alcuni citofoni non aprono il portone al primo tentativo. Segnalazione mandata al tecnico."
+  }
+]

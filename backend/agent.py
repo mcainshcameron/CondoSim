@@ -8,7 +8,7 @@ from .config import AGENT_MAX_TOKENS, AGENT_TEMPERATURE, MAX_TOOL_CALLS_PER_ACTI
 from .events import bus
 from .logging_utils import log, log_error
 from .models import Agent, Message, RunState
-from .openrouter import OpenRouterError, chat_completion
+from .openrouter import OpenRouterError, chat_completion, record_usage
 from .tools import TOOL_SCHEMAS, ToolContext, dispatch_tool, contains_forbidden
 
 
@@ -503,6 +503,7 @@ async def activate_agent(
                 max_tokens=AGENT_MAX_TOKENS,
                 caller=f"agent:{agent_id}:step{step}",
             )
+            record_usage(state, assistant_msg)
         except OpenRouterError as exc:
             log_error("agent", f"{agent_id} OpenRouter failure: {exc}")
             ctx.blocked_sends.append({"error": str(exc), "kind": "openrouter"})

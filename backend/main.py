@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import random
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -22,6 +23,7 @@ from . import memory
 from .config import (
     ADMIN_PASSWORD,
     BACKEND_PORT,
+    DATA_DIR,
     DISABLED,
     HOST,
     PROJECT_ROOT,
@@ -293,6 +295,14 @@ async def api_create_run(request: Request, payload: CreateRunPayload):
 def api_default_opening():
     # The scenario is whatever the admin types. No canned opening.
     return {"text": ""}
+
+
+@app.get("/api/opening_templates")
+def api_opening_templates():
+    path = DATA_DIR / "openings.json"
+    if not path.exists():
+        return {"templates": []}
+    return {"templates": json.loads(path.read_text(encoding="utf-8"))}
 
 
 @app.get("/api/runs/{run_id}")

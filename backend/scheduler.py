@@ -37,6 +37,7 @@ from .events import bus
 from .logging_utils import log, log_error
 from .models import Agent, Message, RunState
 from .storage import save_run
+from .world_events import maybe_inject_world_event
 
 
 # Fallback participation probability when persona.participation_probability
@@ -443,6 +444,7 @@ class DayLoop:
         day = self.state.clock.day
         log("sched", f"=== DAY {day} START === rounds={ROUNDS_PER_DAY}")
         bus().publish(self.state.run_id, "day_start", {"day": day})
+        maybe_inject_world_event(self.state)
 
         # Seed pending reactions from any uncascaded non-resident message.
         # Mirrors v1's "seed from any non-resident message that hasn't been

@@ -21,6 +21,17 @@ AGENT_FALLBACK_MODELS = [
 NARRATOR_MODEL = "anthropic/claude-haiku-4.5"
 CLASSIFIER_MODEL = "anthropic/claude-haiku-4.5"
 
+# Approximate public pricing in USD per 1M input/output tokens. Used only
+# for in-app spend visibility; OpenRouter remains the billing source of truth.
+MODEL_PRICING_USD_PER_M_TOKENS = {
+    "google/gemini-3.1-flash-lite-preview": (0.25, 1.50),
+    "google/gemini-2.0-flash-lite-001": (0.075, 0.30),
+    "meta-llama/llama-3.3-70b-instruct": (0.12, 0.30),
+    "x-ai/grok-4-fast": (0.20, 0.50),
+    "mistralai/mistral-small-2603": (0.10, 0.30),
+    "anthropic/claude-haiku-4.5": (1.00, 5.00),
+}
+
 # Paths (read-only — building authoring data, bundled in the deploy slug)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -34,6 +45,7 @@ ROUNDS_PER_DAY = 4  # round-robin: 5 agents × 4 rounds × ~0.65 prob ≈ 13 act
 AGENT_TEMPERATURE = 1.0  # tool-calling loop: Gemini 3's recommended default; any deviation risks looping
 MEMORY_TEMPERATURE = 1.3  # day_end consolidation: no tools, pure Italian writing — push higher for voice diversity
 AGENT_MAX_TOKENS = 180
+WORLD_EVENT_PROBABILITY = float(os.getenv("WORLD_EVENT_PROBABILITY", "0.4"))
 
 # Logging
 VERBOSE_LOGGING = True  # prints per-activation traces to stderr

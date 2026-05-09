@@ -1,7 +1,7 @@
 """Pydantic schemas for the simulation.
 
 Fictional vs wall-clock time: every user-visible timestamp is *fictional*
-(the in-world 14-day calendar). wall_clock_timestamp is runtime metadata
+(the in-world calendar). wall_clock_timestamp is runtime metadata
 that never reaches an agent.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ ChatKind = Literal["main", "dm", "group", "neighborhood", "assembly"]
 
 
 class FictionalClock(BaseModel):
-    """The in-world clock. Day 1..14, hour 0..23, minute 0..59."""
+    """The in-world clock. Days are open-ended; time is fictional."""
     day: int = 1
     # We track elapsed minutes since Day 1 00:00 for easy arithmetic.
     minutes_since_start: int = 0
@@ -131,6 +131,15 @@ class Motion(BaseModel):
     outcome_note: str | None = None
 
 
+class RunMetrics(BaseModel):
+    """Operational counters accumulated from LLM calls during a run."""
+    llm_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
 class RunState(BaseModel):
     """The complete simulation state for a single run."""
     run_id: str
@@ -145,4 +154,5 @@ class RunState(BaseModel):
     motions: list[Motion] = Field(default_factory=list)
     # trust[speaker_id][listener_id] — nested dict for JSON sanity
     trust: dict[str, dict[str, float]] = Field(default_factory=dict)
+    metrics: RunMetrics = Field(default_factory=RunMetrics)
     ended: bool = False

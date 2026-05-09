@@ -94,10 +94,12 @@ function Setup({ onCreated }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [openingText, setOpeningText] = useState('');
+  const [openingTemplates, setOpeningTemplates] = useState([]);
   const textareaRef = useRef(null);
 
   useEffect(() => {
     api.defaultOpening().then(d => setOpeningText(d.text || '')).catch(() => {});
+    api.openingTemplates().then(d => setOpeningTemplates(d.templates || [])).catch(() => {});
   }, []);
 
   // Auto-grow the opening textarea with its content (capped by CSS max-height).
@@ -211,6 +213,22 @@ function Setup({ onCreated }) {
 
           <div className="setup-col setup-col-compose">
             <div className="setup-section-title">Primo avviso al condominio</div>
+            {openingTemplates.length > 0 && (
+              <div className="opening-template-grid" aria-label="Modelli di apertura">
+                {openingTemplates.map(t => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    className="opening-template"
+                    onClick={() => setOpeningText(t.text || '')}
+                    title={t.text}
+                  >
+                    <span className="opening-template-label">{t.label}</span>
+                    <span className="opening-template-difficulty">{t.difficulty}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="setup-compose-card">
               <div className="setup-compose-head">
                 <Avatar id="admin" name="Amministratore" size={30} />
@@ -539,6 +557,50 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s;
 }
 
+function runPulse(state) {
+  const day = state.clock?.day || 1;
+  const todayMessages = state.messages.filter(m => m.day === day);
+  const residentMessages = todayMessages.filter(m => m.sender_kind === 'resident');
+  const adminMessages = todayMessages.filter(m => m.sender_kind === 'admin');
+  const externalMessages = todayMessages.filter(m => m.sender_kind === 'external');
+  const openMotions = (state.motions || []).filter(m => m.status === 'open');
+  const questions = residentMessages.reduce((sum, m) => sum + ((m.content || '').match(/\?/g) || []).length, 0);
+  const reactions = state.messages.reduce((sum, m) =>
+    sum + Object.values(m.reactions || {}).reduce((n, bucket) => n + bucket.length, 0), 0);
+  const trustValues = [];
+  for (const row of Object.values(state.trust || {})) {
+    for (const v of Object.values(row || {})) trustValues.push(Number(v) || 0);
+  }
+  const trustMovement = trustValues.reduce((sum, v) => sum + Math.abs(v), 0);
+  const score = Math.min(100, Math.round(
+    residentMessages.length * 5 +
+    questions * 6 +
+    openMotions.length * 14 +
+    Math.min(30, trustMovement * 18)
+  ));
+  const level = score >= 70 ? 'Alta tensione' : score >= 35 ? 'Attivo' : 'Calmo';
+  return { day, todayMessages, residentMessages, adminMessages, externalMessages, openMotions, questions, reactions, trustMovement, score, level };
+}
+
+function residentStatusTags(state, agent) {
+  const aid = agent.persona.id;
+  const day = state.clock?.day || 1;
+  const sentToday = state.messages.filter(m => m.sender_id === aid && m.day === day).length;
+  const receivedToday = state.messages.filter(m => m.day === day && (m.audience || []).includes(aid)).length;
+  const trustRow = Object.values(state.trust?.[aid] || {});
+  const avgTrust = trustRow.length
+    ? trustRow.reduce((sum, v) => sum + Number(v || 0), 0) / trustRow.length
+    : 0;
+  const tags = [];
+  if (sentToday >= 3) tags.push('molto attivo');
+  else if (sentToday > 0) tags.push('presente');
+  else if (receivedToday > 0) tags.push('silenzioso');
+  if (avgTrust >= 0.12) tags.push('ben visto');
+  if (avgTrust <= -0.12) tags.push('isolato');
+  if (agent.admin_goal) tags.push('obiettivo');
+  return tags.slice(0, 3);
+}
+
 function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByChat, typingByChat, onOpenProfile }) {
   // Compute DM partner counts + trust edges from current state
   const nameById = useMemo(() => {
@@ -697,6 +759,7 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
       {state.agents.map(a => {
         const msgsToday = state.messages.filter(m => m.sender_id === a.persona.id && m.day === state.clock.day).length;
         const chatId = findChatForResident(state, a.persona.id);
+        const tags = residentStatusTags(state, a);
         return (
           <div
             className="resident-card clickable"
@@ -723,8 +786,11 @@ function LeftPanel({ state, selectedChatId, onSelectChat, onStartDm, unreadByCha
               </div>
               <div className="resident-unit-line">int. {a.persona.unit} · {a.persona.millesimi} mill.</div>
               <div className="desc">{a.persona.public_description}</div>
-              {msgsToday > 0 && (
-                <div className="resident-today">{msgsToday} msg oggi</div>
+              {(msgsToday > 0 || tags.length > 0) && (
+                <div className="resident-status-row">
+                  {msgsToday > 0 && <span className="resident-today">{msgsToday} msg oggi</span>}
+                  {tags.map(tag => <span key={tag} className="resident-status-chip">{tag}</span>)}
+                </div>
               )}
             </div>
           </div>
@@ -1079,6 +1145,7 @@ function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions, onMobil
   const [motionTitle, setMotionTitle] = useState('');
   const [motionDesc, setMotionDesc] = useState('');
   const [status, setStatus] = useState('');
+  const [tab, setTab] = useState('azioni');
 
   const doAction = useCallback(async (fn, successMsg) => {
     try {
@@ -1108,8 +1175,18 @@ function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions, onMobil
 
   const openMotions = (state.motions || []).filter(m => m.status === 'open');
   const closedMotions = (state.motions || []).filter(m => m.status !== 'open').slice(-5);
-
+  const pulse = runPulse(state);
+  const metrics = state.metrics || {};
+  const promptChips = (suggestions || []).filter(s => !s.action);
   const actionChips = (suggestions || []).filter(s => s.action === 'close_motion');
+  const topSpeakers = [...state.agents]
+    .map(a => ({
+      id: a.persona.id,
+      name: a.persona.display_name,
+      count: state.messages.filter(m => m.sender_id === a.persona.id && m.day === state.clock.day).length,
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3);
 
   return (
     <div className="console">
@@ -1125,7 +1202,53 @@ function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions, onMobil
           <span className="console-mobile-title">Console amministratore</span>
         </div>
       )}
+      <div className="console-tabs" role="tablist" aria-label="Console amministratore">
+        <button type="button" className={tab === 'azioni' ? 'active' : ''} onClick={() => setTab('azioni')}>Azioni</button>
+        <button type="button" className={tab === 'mozioni' ? 'active' : ''} onClick={() => setTab('mozioni')}>
+          Mozioni{openMotions.length ? ` ${openMotions.length}` : ''}
+        </button>
+        <button type="button" className={tab === 'stats' ? 'active' : ''} onClick={() => setTab('stats')}>Stats</button>
+      </div>
+      {tab === 'azioni' && (
+        <div className="console-section">
+          <h2>Prossima mossa</h2>
+          <div className="pulse-card">
+            <div className="pulse-card-top">
+              <span>{pulse.level}</span>
+              <strong>{pulse.score}/100</strong>
+            </div>
+            <div className="pulse-bar"><span style={{ width: `${pulse.score}%` }} /></div>
+            <div className="pulse-meta">
+              {pulse.residentMessages.length} msg residenti oggi · {pulse.questions} domande · {openMotions.length} mozioni aperte
+            </div>
+          </div>
+          {actionChips.length > 0 ? (
+            <div className="quick-actions">
+              {actionChips.map(s => (
+                <button
+                  key={s.id}
+                  className="btn secondary quick-action-btn next-action"
+                  onClick={() => handleCloseFromChip(s)}
+                  title={s.label}
+                >{s.label}</button>
+              ))}
+            </div>
+          ) : promptChips.length > 0 ? (
+            <div className="quick-actions compact">
+              {promptChips.slice(0, 3).map(s => (
+                <div key={s.id} className="suggestion-card" title={s.body || s.label}>
+                  <strong>{s.label}</strong>
+                  <span>{truncate(s.body || '', 92)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-note">Nessuna azione urgente. Osserva il prossimo giro o scrivi nel gruppo.</div>
+          )}
+        </div>
+      )}
       {/* Motions */}
+      {tab === 'mozioni' && (
       <div className="console-section">
         <h2>Mozioni {openMotions.length > 0 && <span className="badge">{openMotions.length} aperte</span>}</h2>
         {openMotions.length === 0 && closedMotions.length === 0 && (
@@ -1176,17 +1299,24 @@ function AdminConsole({ state, onFileMotion, onCloseMotion, suggestions, onMobil
           </button>
         </details>
       </div>
+      )}
 
-      {actionChips.length > 0 && (
+      {tab === 'stats' && (
         <div className="console-section">
-          <div className="quick-actions">
-            {actionChips.map(s => (
-              <button
-                key={s.id}
-                className="btn secondary quick-action-btn"
-                onClick={() => handleCloseFromChip(s)}
-                title={s.label}
-              >{s.label}</button>
+          <h2>Statistiche</h2>
+          <div className="stats-grid">
+            <div><strong>{pulse.todayMessages.length}</strong><span>msg oggi</span></div>
+            <div><strong>{pulse.adminMessages.length}</strong><span>tuoi avvisi</span></div>
+            <div><strong>{pulse.externalMessages.length}</strong><span>eventi</span></div>
+            <div><strong>${Number(metrics.estimated_cost_usd || 0).toFixed(4)}</strong><span>spesa stim.</span></div>
+          </div>
+          <div className="console-mini-list">
+            <div className="mini-list-title">Residenti piu attivi oggi</div>
+            {topSpeakers.map(s => (
+              <div key={s.id} className="mini-list-row">
+                <span>{s.name}</span>
+                <strong>{s.count}</strong>
+              </div>
             ))}
           </div>
         </div>
@@ -1334,7 +1464,7 @@ export default function App() {
         if (dayFinished || fresh.ended) {
           setWorking(false);
           setDayStartedAt(null);
-          if (!pausedRef.current && !fresh.ended && fresh.clock.day < 14) {
+          if (!pausedRef.current && !fresh.ended) {
             setNextAdvanceAt(Date.now() + 12000);
           }
         }
@@ -1602,8 +1732,7 @@ export default function App() {
             setDayError('Errore: il giorno non è terminato correttamente.');
             return;
           }
-          const nextDay = (fresh.clock?.day ?? 0) + 1;
-          if (!pausedRef.current && !fresh.ended && nextDay <= 14) {
+          if (!pausedRef.current && !fresh.ended) {
             setNextAdvanceAt(Date.now() + 12000);
           }
         }).catch(() => {});
@@ -1725,7 +1854,7 @@ export default function App() {
       const next = !prev;
       if (next) {
         setNextAdvanceAt(null);
-      } else if (state && !state.ended && !working && state.clock.day < 14) {
+      } else if (state && !state.ended && !working) {
         setNextAdvanceAt(Date.now() + 500);
       }
       return next;
@@ -1796,13 +1925,16 @@ export default function App() {
 
   const displayDate = formatItalianDateTime(state.fictional_start_iso, state.clock.minutes_since_start);
   const messagesToday = state.messages.filter(m => m.day === state.clock.day).length;
+  const metrics = state.metrics || {};
+  const estimatedCost = Number(metrics.estimated_cost_usd || 0);
+  const totalTokens = Number(metrics.total_tokens || 0);
   const formatElapsed = (ms) => {
     const s = Math.max(0, Math.floor(ms / 1000));
     return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
   };
   let topbarSub;
   if (state.ended) {
-    topbarSub = 'Partita conclusa · 14 giorni sono passati';
+    topbarSub = `Partita conclusa · giorno ${state.clock.day}`;
   } else if (working) {
     const timer = dayStartedAt ? ` · ⏱️ ${formatElapsed(nowTick - dayStartedAt)}` : '';
     const pausedHint = paused ? ' · ⏸ pausa dopo il giorno' : '';
@@ -1852,6 +1984,13 @@ export default function App() {
           <div className="fictional-clock-label">Ora nel palazzo</div>
           <div className="fictional-clock-value">🕒 {displayDate}</div>
         </div>
+        <div className="run-metrics" title="Stima operativa basata sui token restituiti da OpenRouter">
+          <div className="run-metrics-label">Spesa stimata</div>
+          <div className="run-metrics-value">
+            ${estimatedCost.toFixed(4)}
+            <span>{totalTokens.toLocaleString('it-IT')} tok</span>
+          </div>
+        </div>
         <div className="topbar-right">
           {!state.ended && (
             <button
@@ -1870,10 +2009,9 @@ export default function App() {
             title="Come si gioca"
             aria-label="Come si gioca"
           >?</button>
-          <div className="day-badge">
+          <div className="day-badge" title="Giorno corrente">
+            <span className="day-badge-label">G</span>
             <span className="day-badge-n">{state.clock.day}</span>
-            <span className="day-badge-sep">/</span>
-            <span className="day-badge-tot">14</span>
           </div>
         </div>
       </div>

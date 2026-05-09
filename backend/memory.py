@@ -21,7 +21,7 @@ from .db import pool
 from .events import bus
 from .logging_utils import log, log_error
 from .models import Agent, RunState
-from .openrouter import OpenRouterError, chat_completion
+from .openrouter import OpenRouterError, chat_completion, record_usage
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +248,7 @@ async def _consolidate_one(
             max_tokens=AGENT_MAX_TOKENS,
             caller=f"memory:{aid}:day{day}",
         )
+        record_usage(state, reply)
     except OpenRouterError as exc:
         log_error("memory", f"{aid} day{day} consolidation failed: {exc}")
         return

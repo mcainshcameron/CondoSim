@@ -8,8 +8,14 @@ from typing import Any
 
 import httpx
 
-from .config import AGENT_FALLBACK_MODELS, OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+from .config import (
+    AGENT_FALLBACK_MODELS,
+    MODEL_PRICING_USD_PER_M_TOKENS,
+    OPENROUTER_API_KEY,
+    OPENROUTER_BASE_URL,
+)
 from .logging_utils import log, log_error
+from .models import RunState
 
 
 class OpenRouterError(RuntimeError):
@@ -71,6 +77,9 @@ async def _single_call(
     usage = data.get("usage", {})
     choices = data.get("choices") or []
     msg = choices[0]["message"] if choices else None
+    if msg is not None:
+        msg["_usage"] = usage
+        msg["_model"] = data.get("model") or model
     content_len = len(msg.get("content") or "") if msg else 0
     tool_calls = (msg.get("tool_calls") or []) if msg else []
     log(
@@ -79,6 +88,37 @@ async def _single_call(
         f"in={usage.get('prompt_tokens','?')} out={usage.get('completion_tokens','?')}",
     )
     return (200, data, "")
+
+
+def _estimate_cost_usd(model: str, usage: dict[str, Any]) -> float:
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    in_rate, out_rate = MODEL_PRICING_USD_PER_M_TOKENS.get(model, (0.0, 0.0))
+    return (prompt / 1_000_000.0 * in_rate) + (completion / 1_000_000.0 * out_rate)
+
+
+def record_usage(state: RunState, message: dict[str, Any]) -> None:
+    """Accumulate OpenRouter usage metadata into the JSONB run snapshot."""
+    usage = message.get("_usage") or {}
+    if not usage:
+        return
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    total = int(usage.get("total_tokens") or (prompt + completion))
+    model = str(message.get("_model") or "")
+    # Some OpenRouter responses include a direct cost; otherwise use the
+    # local approximate table so the UI still has a useful running estimate.
+    cost = usage.get("cost")
+    try:
+        cost_usd = float(cost) if cost is not None else _estimate_cost_usd(model, usage)
+    except (TypeError, ValueError):
+        cost_usd = _estimate_cost_usd(model, usage)
+
+    state.metrics.llm_calls += 1
+    state.metrics.prompt_tokens += prompt
+    state.metrics.completion_tokens += completion
+    state.metrics.total_tokens += total
+    state.metrics.estimated_cost_usd = round(state.metrics.estimated_cost_usd + cost_usd, 6)
 
 
 async def chat_completion(

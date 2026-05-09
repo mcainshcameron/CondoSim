@@ -1,0 +1,38 @@
+[
+  {
+    "id": "heating_quote",
+    "label": "Guasto caldaia",
+    "difficulty": "Media",
+    "text": "Buongiorno a tutti. La caldaia centralizzata e' ferma da stanotte. Il primo preventivo parla di una riparazione urgente da 8.700 euro, da dividere per millesimi. Sto cercando un secondo tecnico, ma se vogliamo acqua calda entro pochi giorni dobbiamo decidere in fretta."
+  },
+  {
+    "id": "missing_funds",
+    "label": "Fondo sparito",
+    "difficulty": "Dura",
+    "text": "Buongiorno. Durante il controllo dei conti ho trovato una differenza di 3.240 euro nel fondo manutenzioni. Prima di accusare qualcuno voglio verificare fatture e bonifici, ma vi informo subito per trasparenza. Mandero' gli estratti appena raccolti."
+  },
+  {
+    "id": "airbnb_noise",
+    "label": "Affitti brevi",
+    "difficulty": "Media",
+    "text": "Buongiorno. Sono arrivate tre segnalazioni di rumori notturni e persone sconosciute che entrano con codice portone. Sembra collegato ad affitti brevi in uno degli appartamenti. Vi chiedo di segnalarmi qui episodi precisi, senza fare nomi se non siete sicuri."
+  },
+  {
+    "id": "water_leak",
+    "label": "Infiltrazioni",
+    "difficulty": "Media",
+    "text": "Buongiorno a tutti. Dal soffitto del vano scale tra 3B e 4C e' comparsa un'infiltrazione. Il tecnico deve capire se arriva da tubazioni comuni o da un appartamento. Finche' non lo sappiamo, vi chiedo massima collaborazione e foto di eventuali macchie o perdite."
+  },
+  {
+    "id": "unpaid_dues",
+    "label": "Quote arretrate",
+    "difficulty": "Leggera",
+    "text": "Buongiorno. Vi aggiorno sulle quote condominiali: ci sono arretrati per 5.600 euro complessivi. Non faro' nomi in gruppo, ma senza rientro rischiamo di rinviare manutenzioni gia' approvate. Chi e' in difficolta' mi scriva in privato entro venerdi'."
+  },
+  {
+    "id": "contractor_overcharge",
+    "label": "Preventivo sospetto",
+    "difficulty": "Dura",
+    "text": "Buongiorno. Il preventivo per il portone e' salito da 4.200 a 11.900 euro dopo il sopralluogo. La ditta parla di 'problemi strutturali imprevisti', ma non ha ancora mandato foto chiare. Prima di firmare voglio il vostro parere e almeno un'alternativa."
+  }
+]

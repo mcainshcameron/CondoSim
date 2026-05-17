@@ -58,7 +58,7 @@ async def build_system_prompt(state: RunState, agent: Agent) -> str:
         "- Hai il gruppo condominiale \"Condominio Via Garibaldi\" dove scrivono tutti i vicini e l'amministratore, più le chat private con i singoli vicini o con l'amministratore.",
         "- Per scrivere, leggere, prenderti un appunto, usa le azioni del telefono. Parlare soltanto tra sé e sé non mette niente in chat — per dire qualcosa devi usare il telefono.",
         "- Se c'è qualcosa da decidere formalmente (una spesa, una regola comune, cambiare amministratore), puoi depositare una mozione dal telefono e farla votare. Ma solo se vale davvero la pena.",
-        "- Se qualcuno dice una cosa ovvia, scontata o con cui sei semplicemente d'accordo, usa una reazione emoji (👍 ❤️ 😂 🙄 😡) invece di scrivere un altro messaggio. Risparmi parole e dici la stessa cosa.",
+        "- Se un vicino dice una cosa ovvia, scontata o con cui sei semplicemente d'accordo, puoi usare una reazione emoji (👍 ❤️ 😂 🙄 😡) invece di scrivere un altro messaggio. Risparmi parole e dici la stessa cosa.",
         "- Quando hai finito di guardare le notifiche e di rispondere, metti giù il telefono.",
         "",
         "Il tuo mondo:",
@@ -135,13 +135,14 @@ def build_notification_prompt(
                 "tu o un altro vicino aveva sollevato, prendine atto invece "
                 "di rifare la stessa domanda. Se invece apre una nuova "
                 "questione per te, parlane. Bastano poche parole tue, o "
-                "anche solo una reazione emoji se non hai altro da aggiungere "
-                "— ma non chiudere il telefono senza dire niente.",
+                "con un messaggio breve in chat o in privato. Una reazione "
+                "emoji non basta per rispondere all'amministratore: deve "
+                "vedere parole tue.",
             ])
         else:
             parts.extend([
                 "",
-                "L'amministratore ha scritto e tu non hai ancora reagito. Apri la chat, leggi cosa ha detto e fai sentire la tua presenza: un messaggio, anche breve, una reazione (👍 ❤️ 😡 🙄 ...), o aprigli un privato. Non chiudere il telefono senza dire niente.",
+                "L'amministratore ha scritto e tu non hai ancora risposto. Apri la chat, leggi cosa ha detto e manda un messaggio breve, nel gruppo o in privato. Non chiudere il telefono senza parole tue.",
             ])
 
     parts.extend(["", inbox_text])
@@ -179,14 +180,14 @@ def build_notification_prompt(
     parts.extend([
         "",
         "Come funziona una chat di gruppo del condominio:",
-        "  • Se l'amministratore fa una domanda al gruppo o ti tocca direttamente, rispondi — la tua voce conta, anche se uno o due vicini hanno già scritto. Bastano poche parole tue (\"tutto ok\", \"per me sì\", \"non lo so\") o anche solo un emoji se non hai altro da aggiungere. Quello che NON va bene è non rispondere proprio.",
-        "  • Quando un altro vicino ha già fatto la TUA stessa domanda all'amministratore, non riformularla con parole tue: meglio una reazione emoji al suo messaggio (👍 / 🙄 / 😡 / 👀 a seconda di come la pensi), o aggiungere un dettaglio tuo se ce l'hai.",
+        "  • Se l'amministratore fa una domanda al gruppo o ti tocca direttamente, rispondi — la tua voce conta, anche se uno o due vicini hanno già scritto. Bastano poche parole tue (\"tutto ok\", \"per me sì\", \"non lo so\"). Quello che NON va bene è non rispondere proprio.",
+        "  • Quando un altro vicino ha già fatto la TUA stessa domanda all'amministratore, non riformularla con parole tue: meglio una reazione emoji al suo messaggio (👍 / 🙄 / 😡 a seconda di come la pensi), o aggiungere un dettaglio tuo se ce l'hai.",
         "  • Quando la conversazione si è già spostata tra voi vicini (confronto, battibecco, alleanza), partecipa lì — non riportarla artificialmente verso l'amministratore.",
         "",
         "Le tre azioni del telefono, tutte legittime:",
         "  • Scrivere un messaggio breve quando hai qualcosa di tuo da dire o quando ti hanno chiesto qualcosa.",
-        "  • Una reazione emoji (👍 ❤️ 😂 🙄 😡 ...) per dire \"ho letto\" / \"d'accordo\" / \"non sono d'accordo\" senza scrivere.",
-        "  • Mettere giù il telefono se davvero non c'è niente che ti riguardi adesso (ma se l'amministratore ti ha chiesto qualcosa, almeno una reazione emoji ci sta sempre).",
+        "  • Una reazione emoji (👍 ❤️ 😂 🙄 😡 ...) a un vicino per dire \"ho letto\" / \"d'accordo\" / \"non sono d'accordo\" senza scrivere.",
+        "  • Mettere giù il telefono se davvero non c'è niente che ti riguardi adesso (ma se l'amministratore ti ha chiesto qualcosa, rispondi con parole tue).",
         "",
         "Fai quello che faresti davvero nei panni di chi sei — non esagerare, ma non fare finta di non vedere quando ti interessa sul serio.",
     ])
@@ -268,13 +269,11 @@ def _fmt_when(msg_day: int, current_day: int, fictional_minutes: int) -> str:
 
 def _latest_unanswered_admin_in_main(state: RunState, agent: Agent, now: int) -> Message | None:
     """Most recent admin message in a chat the agent participates in (main
-    or admin DM) that this agent hasn't yet replied to OR reacted to.
+    or admin DM) that this agent hasn't yet replied to.
 
     "Replied" = the agent has authored at least one message in this chat
-    after the admin message. "Reacted" = the agent's id is in any of the
-    admin message's emoji reaction buckets. Either counts as
-    acknowledgment; if the agent has done neither, the admin message is
-    still owed.
+    after the admin message. Emoji reactions do not count as acknowledgment
+    for admin messages.
 
     Used by the forced-activation prompt to quote the exact thing the
     agent is meant to respond to, instead of leaving them to dig it out
@@ -293,10 +292,6 @@ def _latest_unanswered_admin_in_main(state: RunState, agent: Agent, now: int) ->
             candidate = m
     if candidate is None:
         return None
-    # Did the agent already react with an emoji to this message?
-    for bucket in candidate.reactions.values():
-        if aid in bucket:
-            return None
     # Did the agent already reply (any message authored after `candidate`
     # in the same chat)?
     for m in state.messages:
@@ -472,6 +467,7 @@ async def activate_agent(
         state=state,
         agent_id=agent_id,
         current_fictional_minutes=fictional_minutes_now,
+        forced_for_admin=forced_for_admin,
     )
 
     system_prompt = await build_system_prompt(state, agent)

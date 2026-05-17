@@ -15,6 +15,7 @@ const BACKEND = apiBase;
 const REAL_MS_PER_FIC_MIN = 300;
 const MIN_RENDER_GAP_MS = 1400;
 const MAX_RENDER_GAP_MS = 6500;
+const AUTO_ADVANCE_DELAY_MS = 0;
 
 function compareMessages(a, b) {
   if (a.fictional_timestamp_minutes !== b.fictional_timestamp_minutes) {
@@ -1249,7 +1250,7 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, queuedBy
           <div className="chat-empty">
             <div className="chat-empty-icon">💬</div>
             <div>Nessun messaggio ancora.</div>
-            <div className="chat-empty-sub">Scrivi qui sotto o fai passare il giorno.</div>
+            <div className="chat-empty-sub">Scrivi qui sotto: i residenti risponderanno.</div>
           </div>
         ) : (
           renderedItems.map(item => {
@@ -1552,11 +1553,11 @@ function HelpModal({ onClose }) {
         </div>
 
         <div className="modal-section help-section">
-          <h3>Il ciclo di un giorno</h3>
+          <h3>La conversazione</h3>
           <ol className="help-list">
             <li>Scrivi un avviso nel gruppo, oppure un DM privato a un residente.</li>
             <li>I residenti iniziano a rispondere in tempo finzionale (li vedrai “stanno scrivendo…”).</li>
-            <li>I giorni scorrono da soli: quando la giornata finisce, il prossimo comincia dopo una breve pausa.</li>
+            <li>Il tempo scorre da solo. Tu non devi avanzare o fermare i giorni.</li>
             <li>A fine giornata ogni residente aggiorna il proprio taccuino privato — ricorderà selettivamente quel che è successo.</li>
           </ol>
         </div>
@@ -1593,7 +1594,6 @@ export default function App() {
   const [working, setWorking] = useState(false);
   const [typingAgents, setTypingAgents] = useState({});
   const [dayError, setDayError] = useState(null);
-  const [lastDayStats, setLastDayStats] = useState(null);
   const [profileAgentId, setProfileAgentId] = useState(null);
   const [unreadByChat, setUnreadByChat] = useState({});
   const [queuedMessages, setQueuedMessages] = useState([]);
@@ -1604,21 +1604,13 @@ export default function App() {
   // real chat lands via SSE.
   const [pendingDmRecipient, setPendingDmRecipient] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
-  // Auto-advance bookkeeping. dayStartedAt is wall-clock ms when day_start
-  // fired; nextAdvanceAt is when the next auto-advance is scheduled to run.
-  const [dayStartedAt, setDayStartedAt] = useState(null);
+  // Auto-advance bookkeeping. The player never controls time; this just
+  // keeps the backend day loop moving after each day_done event.
   const [nextAdvanceAt, setNextAdvanceAt] = useState(null);
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  const [paused, setPaused] = useState(false);
   // Active "view" on mobile (≤768px). On desktop the CSS ignores this and
   // shows all three columns. On mobile we only render one at a time and
   // use back/console buttons in ChatColumn + AdminConsole to navigate.
   const [mobileView, setMobileView] = useState('chats');
-
-  // pausedRef lets SSE handlers (registered in a useEffect closure) read the
-  // current paused state without re-subscribing every time it changes.
-  const pausedRef = useRef(paused);
-  useEffect(() => { pausedRef.current = paused; }, [paused]);
 
   // Wall-clock ms when the next resident message is allowed to render, and
   // the fictional-minute timestamp of the most recently scheduled render.
@@ -1679,9 +1671,8 @@ export default function App() {
         const dayFinished = fresh.clock.minutes_since_start >= dayEndMin;
         if (dayFinished || fresh.ended) {
           setWorking(false);
-          setDayStartedAt(null);
-          if (!pausedRef.current && !fresh.ended) {
-            setNextAdvanceAt(Date.now() + 12000);
+          if (!fresh.ended) {
+            setNextAdvanceAt(Date.now() + AUTO_ADVANCE_DELAY_MS);
           }
         }
       }).catch(() => {});
@@ -1725,19 +1716,10 @@ export default function App() {
   // re-scheduling every time state changes underneath us.
   const onAdvanceRef = useRef(null);
 
-  // One-second ticker drives the timer/countdown labels in the topbar.
+  // Kick off day 1 immediately when a run is loaded. Later days also chain
+  // immediately after the backend publishes day_done.
   useEffect(() => {
-    if (!state?.run_id) return;
-    const id = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [state?.run_id]);
-
-  // Kick off day 1 immediately when a run is loaded — the admin's opening
-  // message *is* the inciting event, no reason to make them watch a
-  // countdown before agents start reacting. Subsequent advances are
-  // scheduled inside onAdvance's success path with a small inter-day pause.
-  useEffect(() => {
-    if (!state?.run_id || state.ended || working || paused) return;
+    if (!state?.run_id || state.ended || working) return;
     setNextAdvanceAt(Date.now());
   }, [state?.run_id]);
 
@@ -1928,15 +1910,10 @@ export default function App() {
 
       es.addEventListener('day_start', (e) => {
         setDayError(null);
-        setLastDayStats(null);
-        setDayStartedAt(Date.now());
         setNextAdvanceAt(null);
       });
 
       es.addEventListener('day_end', (e) => {
-        const d = JSON.parse(e.data).data;
-        setLastDayStats({ day: d.day, activations: d.activations, total_messages: d.total_messages });
-        setDayStartedAt(null);
         setTypingAgents({});
         // NB: do NOT chain the next day or clear `working` here. day_end fires
         // mid-lifecycle while the per-run lock is still held (memory
@@ -1947,7 +1924,6 @@ export default function App() {
       es.addEventListener('day_done', (e) => {
         const d = JSON.parse(e.data).data;
         setWorking(false);
-        setDayStartedAt(null);
         // Refresh authoritative state (clock, trust, motions, agent.notes
         // cleared by memory consolidation). Preserve any messages we already
         // streamed in via SSE so we don't drop ones the server hasn't yet
@@ -1965,8 +1941,8 @@ export default function App() {
             setDayError('Errore: il giorno non è terminato correttamente.');
             return;
           }
-          if (!pausedRef.current && !fresh.ended) {
-            setNextAdvanceAt(Date.now() + 12000);
+          if (!fresh.ended) {
+            setNextAdvanceAt(Date.now() + AUTO_ADVANCE_DELAY_MS);
           }
         }).catch(() => {});
       });
@@ -2114,20 +2090,6 @@ export default function App() {
 
   useEffect(() => { onAdvanceRef.current = onAdvance; }, [onAdvance]);
 
-  // Pause / resume: cancel any pending advance when pausing; when resuming an
-  // idle run, kick off the next day right away.
-  const togglePause = useCallback(() => {
-    setPaused(prev => {
-      const next = !prev;
-      if (next) {
-        setNextAdvanceAt(null);
-      } else if (state && !state.ended && !working) {
-        setNextAdvanceAt(Date.now() + 500);
-      }
-      return next;
-    });
-  }, [state, working]);
-
   const onFileMotion = useCallback(async (title, description) => {
     if (!state) return;
     await api.fileMotion(state.run_id, title, description);
@@ -2190,36 +2152,16 @@ export default function App() {
   }
   if (!state) return <Setup onCreated={setState} />;
 
-  const displayDate = formatItalianDateTime(state.fictional_start_iso, state.clock.minutes_since_start);
   const messagesToday = state.messages.filter(m => m.day === state.clock.day).length;
-  const metrics = state.metrics || {};
-  const estimatedCost = Number(metrics.estimated_cost_usd || 0);
-  const totalTokens = Number(metrics.total_tokens || 0);
-  const formatElapsed = (ms) => {
-    const s = Math.max(0, Math.floor(ms / 1000));
-    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-  };
   let topbarSub;
   if (state.ended) {
-    topbarSub = `Partita conclusa · giorno ${state.clock.day}`;
+    topbarSub = 'Partita conclusa';
   } else if (working) {
-    const timer = dayStartedAt ? ` · ⏱️ ${formatElapsed(nowTick - dayStartedAt)}` : '';
-    const pausedHint = paused ? ' · ⏸ pausa dopo il giorno' : '';
-    topbarSub = `Giorno ${state.clock.day} in corso${timer}${pausedHint}`;
-  } else if (paused) {
-    topbarSub = `Giorno ${state.clock.day} · ⏸ in pausa`;
+    topbarSub = 'Residenti attivi · puoi scrivere quando vuoi';
   } else if (nextAdvanceAt) {
-    const secs = Math.max(0, Math.ceil((nextAdvanceAt - nowTick) / 1000));
-    if (state.clock.minutes_since_start === 0) {
-      topbarSub = `Giorno 1 inizia fra ${secs}s…`;
-    } else {
-      const stats = lastDayStats
-        ? ` · ${lastDayStats.activations} attivazioni · ${lastDayStats.total_messages} msg`
-        : '';
-      topbarSub = `Giorno ${state.clock.day} concluso${stats} · prossimo giorno fra ${secs}s…`;
-    }
+    topbarSub = 'Residenti in arrivo...';
   } else {
-    topbarSub = `Giorno ${state.clock.day} · ${messagesToday} messaggi oggi`;
+    topbarSub = `${messagesToday} messaggi oggi · scrivi nel gruppo o in privato`;
   }
 
   // Build a placeholder chat object when the admin is starting a DM with a
@@ -2247,39 +2189,13 @@ export default function App() {
             <div className="topbar-sub">{topbarSub}</div>
           </div>
         </div>
-        <div className="fictional-clock" title="Data e ora nel mondo del palazzo">
-          <div className="fictional-clock-label">Ora nel palazzo</div>
-          <div className="fictional-clock-value">🕒 {displayDate}</div>
-        </div>
-        <div className="run-metrics" title="Stima operativa basata sui token restituiti da OpenRouter">
-          <div className="run-metrics-label">Spesa stimata</div>
-          <div className="run-metrics-value">
-            ${estimatedCost.toFixed(4)}
-            <span>{totalTokens.toLocaleString('it-IT')} tok</span>
-          </div>
-        </div>
         <div className="topbar-right">
-          {!state.ended && (
-            <button
-              className={`pause-btn ${paused ? 'paused' : ''}`}
-              onClick={togglePause}
-              title={paused ? 'Riprendi il ciclo automatico dei giorni' : 'Metti in pausa — i giorni smettono di avanzare'}
-              aria-label={paused ? 'Riprendi' : 'Pausa'}
-            >
-              <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>
-              <span className="pause-btn-label">{paused ? ' Riprendi' : ' Pausa'}</span>
-            </button>
-          )}
           <button
             className="help-btn"
             onClick={() => setShowHelp(true)}
             title="Come si gioca"
             aria-label="Come si gioca"
           >?</button>
-          <div className="day-badge" title="Giorno corrente">
-            <span className="day-badge-label">G</span>
-            <span className="day-badge-n">{state.clock.day}</span>
-          </div>
         </div>
       </div>
       {dayError && <div className="day-status-bar">{dayError}</div>}

@@ -75,21 +75,6 @@ button {
 }
 .topbar h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: 0.2px; }
 .topbar-sub { font-size: 11px; opacity: 0.8; margin-top: 1px; }
-.topbar .day-badge {
-  background: rgba(255,255,255,0.15);
-  padding: 6px 14px;
-  border-radius: 16px;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-  display: flex;
-  align-items: baseline;
-  gap: 2px;
-  font-weight: 500;
-}
-.day-badge-n { font-size: 16px; font-weight: 700; }
-.day-badge-label { opacity: 0.75; font-size: 11px; font-weight: 700; }
-.day-badge-sep { opacity: 0.5; }
-.day-badge-tot { opacity: 0.75; font-size: 12px; }
 
 .main {
   flex: 1;
@@ -868,50 +853,6 @@ button {
   padding: 6px 10px;
 }
 
-/* Fictional clock in topbar */
-.fictional-clock {
-  background: rgba(255,255,255,0.12);
-  padding: 6px 14px;
-  border-radius: 6px;
-  text-align: center;
-}
-.fictional-clock-label {
-  font-size: 10px;
-  opacity: 0.7;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.fictional-clock-value {
-  font-size: 14px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-}
-.run-metrics {
-  background: rgba(255,255,255,0.12);
-  padding: 6px 12px;
-  border-radius: 6px;
-  min-width: 118px;
-}
-.run-metrics-label {
-  font-size: 10px;
-  opacity: 0.7;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.run-metrics-value {
-  font-size: 13px;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-}
-.run-metrics-value span {
-  display: block;
-  font-size: 10px;
-  font-weight: 500;
-  opacity: 0.72;
-}
-
 .console h2 .badge {
   background: var(--brand);
   color: white;
@@ -1162,27 +1103,6 @@ button {
   align-items: center;
   gap: 12px;
 }
-
-/* Pause/resume button in topbar */
-.pause-btn {
-  background: rgba(255,255,255,0.15);
-  border: 1px solid rgba(255,255,255,0.25);
-  color: white;
-  padding: 5px 12px;
-  border-radius: 14px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  line-height: 1.2;
-  transition: background 0.12s, transform 0.1s;
-}
-.pause-btn:hover { background: rgba(255,255,255,0.28); }
-.pause-btn.paused {
-  background: #fff3cd;
-  color: #6b4a00;
-  border-color: #e5c97a;
-}
-.pause-btn.paused:hover { background: #ffe9a8; }
 
 /* Help button in topbar */
 .help-btn {
@@ -2064,26 +1984,13 @@ button {
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  /* Clock and spend duplicate topbar/context on mobile — drop them. */
-  .fictional-clock,
-  .run-metrics { display: none; }
   .topbar-right {
     gap: 6px;
     flex-shrink: 0;
     flex-wrap: nowrap;
   }
-  .pause-btn {
-    padding: 6px 10px;
-    font-size: 13px;
-    border-radius: 14px;
-    line-height: 1;
-  }
-  .pause-btn-label { display: none; } /* icon-only on mobile */
-  /* The "?" help button is rare-use after the auto-tutorial; the day
-     badge repeats info already in topbar-sub. Hide both
-     to free the right side for the pause button. */
+  /* The "?" help button is rare-use after the auto-tutorial. */
   .help-btn { display: none; }
-  .day-badge { display: none; }
 
   /* --- Main: single-column view stack ------------------------- */
   .main {
@@ -2368,10 +2275,5 @@ button {
     justify-content: center;
     margin-right: -8px; /* re-align with desktop visual position */
   }
-}
-
-/* Very small phones: trim further so the topbar still fits. */
-@media (max-width: 380px) {
-  .pause-btn { padding: 4px 8px; font-size: 10.5px; }
 }
 

@@ -38,7 +38,6 @@ from .events import bus
 from .logging_utils import log, log_error
 from .models import Agent, Message, RunState
 from .storage import save_run
-from .world_events import maybe_inject_world_event
 
 
 # Fallback participation probability when persona.participation_probability
@@ -405,11 +404,9 @@ class DayLoop:
             except Exception as exc:
                 log_error("sched", f"{aid} activation failed: {exc!r}")
                 continue
-            acknowledged = bool(ctx.sent_messages_this_activation) or bool(
-                ctx.reactions_added_this_activation
-            )
+            acknowledged = bool(ctx.sent_messages_this_activation)
             if forced_reason is not None and not acknowledged:
-                # Forced agent closed the phone without sending or reacting.
+                # Forced agent closed the phone without sending.
                 # Keep them in pending so the bonus drain retries them — the
                 # admin's message must not be silently ignored.
                 self.pending_admin_reactions.add(aid)
@@ -446,8 +443,6 @@ class DayLoop:
         day = self.state.clock.day
         log("sched", f"=== DAY {day} START === rounds={ROUNDS_PER_DAY}")
         bus().publish(self.state.run_id, "day_start", {"day": day})
-        maybe_inject_world_event(self.state)
-
         # Seed pending reactions from any uncascaded non-resident message.
         # Mirrors v1's "seed from any non-resident message that hasn't been
         # cascaded yet" behaviour — admin messages sent between days, during
@@ -498,9 +493,7 @@ class DayLoop:
                     log_error("sched", f"{aid} bonus activation failed: {exc!r}")
                     self.pending_admin_reactions.discard(aid)
                     continue
-                acknowledged = bool(ctx.sent_messages_this_activation) or bool(
-                    ctx.reactions_added_this_activation
-                )
+                acknowledged = bool(ctx.sent_messages_this_activation)
                 if acknowledged:
                     self.pending_admin_reactions.discard(aid)
                 else:

@@ -54,7 +54,7 @@ FORBIDDEN_RE = re.compile("|".join(FORBIDDEN_TERMS), re.IGNORECASE)
 # katakana). The list is intentionally short: a reaction reads as a social
 # signal, not a vocabulary.
 ALLOWED_REACTION_EMOJI = (
-    "👍", "❤️", "😂", "😮", "😢", "😡", "🔥", "🙄", "💯", "🙏", "👀",
+    "👍", "❤️", "😂", "😮", "😢", "😡", "🔥", "🙄", "💯", "🙏",
 )
 ALLOWED_REACTION_SET = frozenset(ALLOWED_REACTION_EMOJI)
 
@@ -265,7 +265,7 @@ TOOL_SCHEMAS = [
             "name": "react_to_message",
             "description": (
                 "Reagisci a un messaggio recente con una delle reazioni permesse "
-                "(👍 ❤️ 😂 😮 😢 😡 🔥 🙄 💯 🙏 👀). Non conta come messaggio pieno: "
+                "(👍 ❤️ 😂 😮 😢 😡 🔥 🙄 💯 🙏). Non conta come messaggio pieno: "
                 "serve per dire \"ho letto\" o \"sono d'accordo\" senza scrivere. "
                 "Identifica il messaggio dalle sue prime 5-10 parole."
             ),
@@ -277,7 +277,7 @@ TOOL_SCHEMAS = [
                     "emoji": {
                         "type": "string",
                         "enum": list(ALLOWED_REACTION_EMOJI),
-                        "description": "Reazione: una tra 👍 ❤️ 😂 😮 😢 😡 🔥 🙄 💯 🙏 👀.",
+                        "description": "Reazione: una tra 👍 ❤️ 😂 😮 😢 😡 🔥 🙄 💯 🙏.",
                     },
                 },
                 "required": ["chat", "message_excerpt", "emoji"],
@@ -305,12 +305,11 @@ class ToolContext:
     state: RunState
     agent_id: str
     current_fictional_minutes: int  # advances as the agent sends messages
+    forced_for_admin: bool = False
     last_seen_message_ids: dict[str, str] = field(default_factory=dict)  # chat_id -> last read msg id
     sent_messages_this_activation: list[Message] = field(default_factory=list)
-    # Emoji reactions added this activation: list of (message_id, emoji). Used
-    # by the scheduler to detect "the agent acknowledged" — a forced
-    # activation that produces neither a sent message nor a reaction is not
-    # cleared from `pending_admin_reactions` and gets retried in a bonus drain.
+    # Emoji reactions added this activation: list of (message_id, emoji).
+    # Useful for trust/UI, but not enough to clear a forced admin obligation.
     reactions_added_this_activation: list[tuple[str, str]] = field(default_factory=list)
     blocked_sends: list[dict] = field(default_factory=list)  # containment audit
     done: bool = False
@@ -996,6 +995,11 @@ def tool_react_to_message(ctx: ToolContext, chat: str, message_excerpt: str, emo
     )
     if msg is None:
         return "Non trovo il messaggio a cui vuoi reagire."
+    if ctx.forced_for_admin and msg.sender_kind == "admin":
+        return (
+            "L'amministratore ti ha chiamato in causa: rispondi con un messaggio breve "
+            "invece di usare solo una reazione."
+        )
     emoji = (emoji or "").strip()
     if emoji not in ALLOWED_REACTION_SET:
         return f"Usa una di queste reazioni: {' '.join(ALLOWED_REACTION_EMOJI)}."

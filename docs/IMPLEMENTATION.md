@@ -4,6 +4,14 @@ Living document describing what's actually built, how it's structured, and what 
 
 ---
 
+## Current simplifications
+
+- Automatic "Bacheca del palazzo" ambient notices have been removed. The game now only moves from admin/resident messages, motions, and memory consolidation.
+- Frontend day chaining has no artificial inter-day pause or pause/resume control; time moves automatically and the player only participates by reading and writing messages.
+- Forced admin reactions require a written resident response. Emoji reactions are still available for resident-to-resident chatter, but they no longer acknowledge admin prompts.
+
+---
+
 ## 1. What this simulates
 
 A five-resident Italian condominium WhatsApp group. The admin (you, via the UI) posts an opening message; the residents react, form alliances, fight, gossip, and occasionally file formal motions. Everything happens in chat — residents cannot meet in person.

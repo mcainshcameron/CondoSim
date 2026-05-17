@@ -45,7 +45,6 @@ ROUNDS_PER_DAY = 4  # round-robin: 5 agents × 4 rounds × ~0.65 prob ≈ 13 act
 AGENT_TEMPERATURE = 1.0  # tool-calling loop: Gemini 3's recommended default; any deviation risks looping
 MEMORY_TEMPERATURE = 1.3  # day_end consolidation: no tools, pure Italian writing — push higher for voice diversity
 AGENT_MAX_TOKENS = 180
-WORLD_EVENT_PROBABILITY = float(os.getenv("WORLD_EVENT_PROBABILITY", "0.4"))
 
 # Logging
 VERBOSE_LOGGING = True  # prints per-activation traces to stderr

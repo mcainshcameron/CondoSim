@@ -15,15 +15,46 @@ const BACKEND = apiBase;
 const REAL_MS_PER_FIC_MIN = 300;
 const MIN_RENDER_GAP_MS = 1400;
 const MAX_RENDER_GAP_MS = 6500;
-const AUTO_ADVANCE_DELAY_MS = 0;
+const AUTO_ADVANCE_DELAY_MS = 1200;
+
+// Hard ceiling on how far behind the server the render queue may fall.
+// Without it the queue is unbounded: a busy day emits ~15 messages, each
+// waiting up to MAX_RENDER_GAP_MS, so the UI could sit a minute behind and
+// the *next* day would start streaming while the previous one was still
+// flushing — two days' messages interleaving in the queue. Capping the lag
+// keeps pacing pleasant without ever letting it become the bottleneck.
+const MAX_QUEUE_LAG_MS = 7000;
+
+// Playback speeds offered in the topbar. `Infinity` renders instantly.
+const SPEEDS = [
+  { id: 'calma',   label: '0.5×', factor: 0.5 },
+  { id: 'normale', label: '1×',   factor: 1 },
+  { id: 'veloce',  label: '2×',   factor: 2 },
+  { id: 'subito',  label: '⚡',    factor: Infinity },
+];
+
+// Treat the stream as stalled after this long with no SSE traffic while a
+// day is supposedly running.
+const SSE_STALL_MS = 25000;
+
+const END_REASON_TEXT = {
+  cost_cap_exceeded:
+    'Partita conclusa: raggiunto il tetto di spesa impostato per questa partita.',
+  monthly_budget_exhausted:
+    'Partita conclusa: raggiunto il tetto di spesa mensile. Riprende il mese prossimo, o alza MONTHLY_COST_CAP_USD.',
+};
 
 function compareMessages(a, b) {
   if (a.fictional_timestamp_minutes !== b.fictional_timestamp_minutes) {
     return a.fictional_timestamp_minutes - b.fictional_timestamp_minutes;
   }
-  if (a.wall_clock_iso && b.wall_clock_iso && a.wall_clock_iso !== b.wall_clock_iso) {
-    return String(a.wall_clock_iso).localeCompare(String(b.wall_clock_iso));
-  }
+  // `seq` is the backend's per-run monotonic counter (backend/timeline.py).
+  // Together with the timestamp it is a TOTAL order, so re-sorting after a
+  // refetch or an out-of-order SSE arrival can never reshuffle messages the
+  // player has already read — which is exactly what used to happen.
+  const aSeq = a.seq || 0;
+  const bSeq = b.seq || 0;
+  if (aSeq !== bSeq) return aSeq - bSeq;
   return String(a.id || '').localeCompare(String(b.id || ''));
 }
 
@@ -1604,9 +1635,23 @@ export default function App() {
   // real chat lands via SSE.
   const [pendingDmRecipient, setPendingDmRecipient] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
-  // Auto-advance bookkeeping. The player never controls time; this just
-  // keeps the backend day loop moving after each day_done event.
+  // Auto-advance bookkeeping. Days chain themselves after each day_done;
+  // the player steers with the pause + speed controls in the topbar.
   const [nextAdvanceAt, setNextAdvanceAt] = useState(null);
+  const [paused, setPaused] = useState(false);
+  const [speedId, setSpeedId] = useState('normale');
+
+  // SSE handlers are created once per run and close over stale state, so
+  // the live values they need are mirrored into refs.
+  const pausedRef = useRef(false);
+  useEffect(() => { pausedRef.current = paused; }, [paused]);
+  const speedFactor = (SPEEDS.find(s => s.id === speedId) || SPEEDS[1]).factor;
+  const speedRef = useRef(1);
+  useEffect(() => { speedRef.current = speedFactor; }, [speedFactor]);
+
+  // Wall-clock of the last SSE event, used to tell "the day is just slow"
+  // apart from "the stream died".
+  const lastEventAtRef = useRef(Date.now());
   // Active "view" on mobile (≤768px). On desktop the CSS ignores this and
   // shows all three columns. On mobile we only render one at a time and
   // use back/console buttons in ChatColumn + AdminConsole to navigate.
@@ -1663,15 +1708,23 @@ export default function App() {
           return { ...fresh, messages: merged };
         });
 
-        // day_end_minutes(d) = (d - 1) * 1440 + 23 * 60. If the clock has
-        // reached or passed that, the day's loop has finished server-side
-        // even if the day_done SSE never arrived — unstick the UI and
-        // chain the next advance.
-        const dayEndMin = (fresh.clock.day - 1) * 1440 + 23 * 60;
-        const dayFinished = fresh.clock.minutes_since_start >= dayEndMin;
-        if (dayFinished || fresh.ended) {
+        if (fresh.ended) {
           setWorking(false);
-          if (!fresh.ended) {
+          setNextAdvanceAt(null);
+          return;
+        }
+        // Only force-unstick on a genuinely dead stream.
+        //
+        // The old check was "clock >= day_end_minutes → the day is over".
+        // But the scheduler sets the clock to day-end *before* memory
+        // consolidation and *before* releasing the run lock, so that test
+        // fired every time — clearing `working` mid-day and POSTing an
+        // advance that the backend answered with 409. Waiting for real SSE
+        // silence keeps the recovery path without the false positives.
+        const silentFor = Date.now() - lastEventAtRef.current;
+        if (silentFor > SSE_STALL_MS) {
+          setWorking(false);
+          if (!pausedRef.current) {
             setNextAdvanceAt(Date.now() + AUTO_ADVANCE_DELAY_MS);
           }
         }
@@ -1719,13 +1772,25 @@ export default function App() {
   // Kick off day 1 immediately when a run is loaded. Later days also chain
   // immediately after the backend publishes day_done.
   useEffect(() => {
-    if (!state?.run_id || state.ended || working) return;
+    if (!state?.run_id || state.ended || working || paused) return;
     setNextAdvanceAt(Date.now());
   }, [state?.run_id]);
 
+  // Pausing cancels a pending advance; resuming re-arms it. A day already
+  // running on the server finishes either way — pause governs whether the
+  // NEXT day starts, which is what stops the clock (and the spend).
+  useEffect(() => {
+    if (paused) {
+      setNextAdvanceAt(null);
+      return;
+    }
+    if (!state?.run_id || state.ended || working) return;
+    setNextAdvanceAt(Date.now() + AUTO_ADVANCE_DELAY_MS);
+  }, [paused]);
+
   // Fire the auto-advance once its scheduled time elapses.
   useEffect(() => {
-    if (!nextAdvanceAt) return;
+    if (!nextAdvanceAt || paused) return;
     const remaining = nextAdvanceAt - Date.now();
     const fire = () => {
       setNextAdvanceAt(null);
@@ -1734,7 +1799,7 @@ export default function App() {
     if (remaining <= 0) { fire(); return; }
     const id = setTimeout(fire, remaining);
     return () => clearTimeout(id);
-  }, [nextAdvanceAt]);
+  }, [nextAdvanceAt, paused]);
 
   // Ref so SSE handlers always see the latest selected chat without needing
   // to re-subscribe when the selection changes.
@@ -1842,11 +1907,22 @@ export default function App() {
       if (es) es.close();
       es = new EventSource(`${BACKEND}/api/runs/${runId}/events`);
 
+      // Every listener stamps the last-traffic clock, so the watchdog can
+      // distinguish "this day is just slow" from "the stream is dead"
+      // instead of force-unsticking the UI mid-day.
+      const on = (name, fn) => es.addEventListener(name, (e) => {
+        lastEventAtRef.current = Date.now();
+        fn(e);
+      });
+
       // Every (re)open refetches the run so we catch anything the stream
       // missed while disconnected.
-      es.addEventListener('open', refetchAndMerge);
+      es.addEventListener('open', () => {
+        lastEventAtRef.current = Date.now();
+        refetchAndMerge();
+      });
 
-      es.addEventListener('message_sent', (e) => {
+      on('message_sent', (e) => {
         const payload = JSON.parse(e.data).data;
         const msg = payload.message;
         // Admin's own send: render instantly (their action, no need to pace).
@@ -1861,6 +1937,14 @@ export default function App() {
         // absorbs real wall-clock delays — if SSE was idle long enough that
         // the gap already elapsed, the next message renders immediately.
         const now = Date.now();
+        const speed = speedRef.current;
+        if (!Number.isFinite(speed)) {
+          // ⚡ instant: skip pacing entirely.
+          lastRenderedFicMinRef.current = msg.fictional_timestamp_minutes;
+          nextRenderSlotRef.current = now;
+          renderIncomingMessage(payload);
+          return;
+        }
         const lastFic = lastRenderedFicMinRef.current;
         const ficDelta = lastFic == null
           ? 0
@@ -1868,8 +1952,13 @@ export default function App() {
         const gap = Math.max(
           MIN_RENDER_GAP_MS,
           Math.min(ficDelta * REAL_MS_PER_FIC_MIN, MAX_RENDER_GAP_MS),
+        ) / speed;
+        // Clamp the queue: never schedule further than MAX_QUEUE_LAG_MS out.
+        // Pacing is a nicety; falling minutes behind the server is not.
+        const renderAt = Math.min(
+          Math.max(now, nextRenderSlotRef.current),
+          now + MAX_QUEUE_LAG_MS,
         );
-        const renderAt = Math.max(now, nextRenderSlotRef.current);
         nextRenderSlotRef.current = renderAt + gap;
         lastRenderedFicMinRef.current = msg.fictional_timestamp_minutes;
         const delay = renderAt - now;
@@ -1894,12 +1983,12 @@ export default function App() {
         }
       });
 
-      es.addEventListener('typing_start', (e) => {
+      on('typing_start', (e) => {
         const d = JSON.parse(e.data).data;
         setTypingAgents(prev => ({ ...prev, [d.agent_id]: d.display_name }));
       });
 
-      es.addEventListener('typing_stop', (e) => {
+      on('typing_stop', (e) => {
         const d = JSON.parse(e.data).data;
         setTypingAgents(prev => {
           const next = { ...prev };
@@ -1908,12 +1997,12 @@ export default function App() {
         });
       });
 
-      es.addEventListener('day_start', (e) => {
+      on('day_start', (e) => {
         setDayError(null);
         setNextAdvanceAt(null);
       });
 
-      es.addEventListener('day_end', (e) => {
+      on('day_end', (e) => {
         setTypingAgents({});
         // NB: do NOT chain the next day or clear `working` here. day_end fires
         // mid-lifecycle while the per-run lock is still held (memory
@@ -1921,7 +2010,7 @@ export default function App() {
         // handler below, which fires AFTER the lock is released.
       });
 
-      es.addEventListener('day_done', (e) => {
+      on('day_done', (e) => {
         const d = JSON.parse(e.data).data;
         setWorking(false);
         // Refresh authoritative state (clock, trust, motions, agent.notes
@@ -1941,13 +2030,24 @@ export default function App() {
             setDayError('Errore: il giorno non è terminato correttamente.');
             return;
           }
-          if (!fresh.ended) {
+          // Don't chain while paused — resuming re-schedules it.
+          if (!fresh.ended && !pausedRef.current) {
             setNextAdvanceAt(Date.now() + AUTO_ADVANCE_DELAY_MS);
           }
         }).catch(() => {});
       });
 
-      es.addEventListener('motion_filed', (e) => {
+      // The backend hit a spend cap and stopped the run on purpose.
+      on('run_ended', (e) => {
+        const d = JSON.parse(e.data).data;
+        setWorking(false);
+        setNextAdvanceAt(null);
+        setState(prev => prev
+          ? { ...prev, ended: true, ended_reason: d.reason }
+          : prev);
+      });
+
+      on('motion_filed', (e) => {
         const d = JSON.parse(e.data).data;
         setState(prev => {
           if (!prev) return prev;
@@ -1956,7 +2056,7 @@ export default function App() {
         });
       });
 
-      es.addEventListener('vote_cast', (e) => {
+      on('vote_cast', (e) => {
         const d = JSON.parse(e.data).data;
         setState(prev => {
           if (!prev) return prev;
@@ -1969,7 +2069,7 @@ export default function App() {
         });
       });
 
-      es.addEventListener('motion_closed', (e) => {
+      on('motion_closed', (e) => {
         const d = JSON.parse(e.data).data;
         setState(prev => {
           if (!prev) return prev;
@@ -1991,7 +2091,7 @@ export default function App() {
         }).catch(() => {});
       });
 
-      es.addEventListener('reaction_added', (e) => {
+      on('reaction_added', (e) => {
         const d = JSON.parse(e.data).data;
         setState(prev => {
           if (!prev) return prev;
@@ -2004,11 +2104,11 @@ export default function App() {
         });
       });
 
-      es.addEventListener('memory_consolidation_done', () => {
+      on('memory_consolidation_done', () => {
         setMemoryRefreshSeq(n => n + 1);
       });
 
-      es.addEventListener('trust_updated', () => {
+      on('trust_updated', () => {
         // Re-fetch run for the authoritative trust matrix
         api.getRun(runId).then(fresh => {
           setState(prev => prev ? { ...prev, trust: fresh.trust } : prev);
@@ -2068,7 +2168,7 @@ export default function App() {
   }, [queuedMessages]);
 
   const onAdvance = useCallback(async () => {
-    if (!state || working) return;
+    if (!state || working || paused || state.ended) return;
     setNextAdvanceAt(null);
     setWorking(true);
     setDayError(null);
@@ -2086,7 +2186,7 @@ export default function App() {
       setDayError('Errore: ' + String(e));
       setWorking(false);
     }
-  }, [state, working]);
+  }, [state, working, paused]);
 
   useEffect(() => { onAdvanceRef.current = onAdvance; }, [onAdvance]);
 
@@ -2153,9 +2253,12 @@ export default function App() {
   if (!state) return <Setup onCreated={setState} />;
 
   const messagesToday = state.messages.filter(m => m.day === state.clock.day).length;
+  const spentUsd = Number(state.metrics?.estimated_cost_usd || 0);
   let topbarSub;
   if (state.ended) {
     topbarSub = 'Partita conclusa';
+  } else if (paused) {
+    topbarSub = 'In pausa · il tempo è fermo, nessuna spesa in corso';
   } else if (working) {
     topbarSub = 'Residenti attivi · puoi scrivere quando vuoi';
   } else if (nextAdvanceAt) {
@@ -2186,10 +2289,37 @@ export default function App() {
           <div className="topbar-logo">🏢</div>
           <div>
             <h1>Condominio Via Garibaldi</h1>
-            <div className="topbar-sub">{topbarSub}</div>
+            <div className="topbar-sub">
+              <span className="topbar-day">Giorno {state.clock.day}</span>
+              {' · '}{topbarSub}
+            </div>
           </div>
         </div>
         <div className="topbar-right">
+          {!state.ended && (
+            <>
+              <button
+                className={`playback-btn ${paused ? 'resumed' : ''}`}
+                onClick={() => setPaused(p => !p)}
+                title={paused ? 'Riprendi il tempo' : 'Metti in pausa il tempo'}
+                aria-label={paused ? 'Riprendi' : 'Pausa'}
+              >{paused ? '▶ Riprendi' : '⏸ Pausa'}</button>
+              <div className="speed-group" role="group" aria-label="Velocità">
+                {SPEEDS.map(s => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={`speed-btn ${speedId === s.id ? 'active' : ''}`}
+                    onClick={() => setSpeedId(s.id)}
+                    title={s.id === 'subito' ? 'Mostra i messaggi appena arrivano' : `Velocità ${s.label}`}
+                  >{s.label}</button>
+                ))}
+              </div>
+            </>
+          )}
+          <span className="topbar-cost" title="Spesa stimata per questa partita">
+            ${spentUsd.toFixed(3)}
+          </span>
           <button
             className="help-btn"
             onClick={() => setShowHelp(true)}
@@ -2198,6 +2328,12 @@ export default function App() {
           >?</button>
         </div>
       </div>
+      {state.ended && (
+        <div className="run-ended-bar">
+          {END_REASON_TEXT[state.ended_reason]
+            || 'Partita conclusa. Ricarica la pagina per iniziarne una nuova.'}
+        </div>
+      )}
       {dayError && <div className="day-status-bar">{dayError}</div>}
       <div className="main" data-mobile-view={mobileView}>
         <LeftPanel

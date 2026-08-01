@@ -12,16 +12,17 @@ than external instructions.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import building
+from . import building, timeline
 from .config import AGENT_MAX_TOKENS, MEMORY_TEMPERATURE
-from .db import pool
+from .db import has_database, pool
 from .events import bus
+from .llm import BudgetExceeded, OpenRouterError, complete
 from .logging_utils import log, log_error
 from .models import Agent, RunState
-from .openrouter import OpenRouterError, chat_completion, record_usage
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,53 @@ def soul_path(state: RunState, agent_id: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Storage: Postgres when DATABASE_URL is set, in-process dict otherwise.
+# Both paths append with the same trim-then-concat semantics.
+# ---------------------------------------------------------------------------
+
+_MEM_AGENT_MEMORY: dict[tuple[str, str], str] = {}
+
+
+async def _write_memory(run_id: str, agent_id: str, content: str) -> None:
+    if not has_database():
+        _MEM_AGENT_MEMORY[(run_id, agent_id)] = content
+        return
+    async with pool().acquire() as conn:
+        await conn.execute(
+            """
+            insert into agent_memory (run_id, agent_id, content)
+            values ($1, $2, $3)
+            on conflict (run_id, agent_id) do update
+              set content = excluded.content,
+                  updated_at = now()
+            """,
+            run_id,
+            agent_id,
+            content,
+        )
+
+
+async def _append_memory(run_id: str, agent_id: str, addition: str) -> None:
+    """Atomically append a day entry to an agent's diary."""
+    if not has_database():
+        prev = _MEM_AGENT_MEMORY.get((run_id, agent_id), "")
+        _MEM_AGENT_MEMORY[(run_id, agent_id)] = prev.rstrip(" \t\n\r") + addition
+        return
+    async with pool().acquire() as conn:
+        await conn.execute(
+            """
+            update agent_memory
+               set content = rtrim(content, E' \\t\\n\\r') || $3,
+                   updated_at = now()
+             where run_id = $1 and agent_id = $2
+            """,
+            run_id,
+            agent_id,
+            addition,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Readers (used by build_system_prompt)
 # ---------------------------------------------------------------------------
 
@@ -52,7 +100,46 @@ def read_soul(state: RunState, agent_id: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
+_DAY_HEADER_RE = re.compile(r"^--- Giorno \d+.*?---$", re.MULTILINE)
+
+
+def window_memory(content: str, keep_days: int) -> str:
+    """Keep the biographical seed plus the most recent `keep_days` entries.
+
+    MEMORY is append-only: every day adds a diary block, and the whole thing
+    was being pasted into every activation prompt. By day 20 that is most of
+    the prompt, it costs real money on every wake-up, and the model drowns in
+    undifferentiated history — the oldest entries crowd out what just
+    happened.
+
+    The seed (everything before the first `--- Giorno N ---` header) is
+    biographical bedrock and always kept. Older day entries are dropped from
+    the *prompt* only; the full diary stays in the database and is what the
+    MEMORY viewer shows.
+    """
+    if keep_days <= 0 or not content:
+        return content
+    headers = list(_DAY_HEADER_RE.finditer(content))
+    if len(headers) <= keep_days:
+        return content
+    seed = content[: headers[0].start()].rstrip()
+    cutoff = headers[-keep_days].start()
+    recent = content[cutoff:].strip()
+    dropped = len(headers) - keep_days
+    elision = (
+        f"[...{dropped} giorni precedenti: te li ricordi a grandi linee, "
+        f"non nei dettagli...]"
+    )
+    return f"{seed}\n\n{elision}\n\n{recent}"
+
+
 async def read_memory(state: RunState, agent_id: str) -> str:
+    if not has_database():
+        content = _MEM_AGENT_MEMORY.get((state.run_id, agent_id))
+        if content is None:
+            log_error("memory", f"missing MEMORY for {agent_id} in run {state.run_id}")
+            return ""
+        return content.strip()
     async with pool().acquire() as conn:
         row = await conn.fetchrow(
             "select content from agent_memory where run_id = $1 and agent_id = $2",
@@ -72,7 +159,7 @@ async def read_memory(state: RunState, agent_id: str) -> str:
 async def initialize_run_memory(state: RunState) -> None:
     """Seed each agent's MEMORY row from their building memory_seed file."""
     seeds_dir = _memory_seeds_dir(state)
-    rows: list[tuple[str, str, str]] = []
+    count = 0
     for agent in state.agents:
         seed = seeds_dir / f"{agent.persona.id}.md"
         if not seed.exists():
@@ -80,20 +167,9 @@ async def initialize_run_memory(state: RunState) -> None:
             content = ""
         else:
             content = seed.read_text(encoding="utf-8")
-        rows.append((state.run_id, agent.persona.id, content))
-
-    async with pool().acquire() as conn:
-        await conn.executemany(
-            """
-            insert into agent_memory (run_id, agent_id, content)
-            values ($1, $2, $3)
-            on conflict (run_id, agent_id) do update
-              set content = excluded.content,
-                  updated_at = now()
-            """,
-            rows,
-        )
-    log("memory", f"initialized memory for run {state.run_id}: {len(rows)} agents")
+        await _write_memory(state.run_id, agent.persona.id, content)
+        count += 1
+    log("memory", f"initialized memory for run {state.run_id}: {count} agents")
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +221,7 @@ def _today_transcript(state: RunState, agent: Agent, day: int) -> str:
         # Visible = agent in audience, or agent is sender
         if aid in m.audience or m.sender_id == aid:
             visible.append(m)
-    visible.sort(key=lambda m: m.fictional_timestamp_minutes)
+    visible.sort(key=timeline.sort_key)
 
     lines = []
     for m in visible:
@@ -219,18 +295,7 @@ async def _consolidate_one(
             f"\n\n--- Giorno {day}, {weekday} ---\n"
             f"Giornata silenziosa, niente da segnare.\n"
         )
-        async with pool().acquire() as conn:
-            await conn.execute(
-                """
-                update agent_memory
-                   set content = rtrim(content, E' \\t\\n\\r') || $3,
-                       updated_at = now()
-                 where run_id = $1 and agent_id = $2
-                """,
-                state.run_id,
-                aid,
-                addition,
-            )
+        await _append_memory(state.run_id, aid, addition)
         log("memory", f"{aid} day{day} silent (visible={visible}), skipped LLM consolidation")
         agent.notes = []
         return
@@ -241,14 +306,26 @@ async def _consolidate_one(
     prompt = _consolidation_prompt(state, agent, day, soul, memory_so_far, transcript)
 
     try:
-        reply = await chat_completion(
+        reply = await complete(
+            state=state,
             model=agent.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=MEMORY_TEMPERATURE,
             max_tokens=AGENT_MAX_TOKENS,
             caller=f"memory:{aid}:day{day}",
         )
-        record_usage(state, reply)
+    except BudgetExceeded as exc:
+        # Out of budget at day end: keep the diary honest rather than
+        # silently dropping the day.
+        log_error("memory", f"{aid} day{day} consolidation skipped: {exc}")
+        weekday = _weekday_italian(state, day)
+        await _append_memory(
+            state.run_id,
+            aid,
+            f"\n\n--- Giorno {day}, {weekday} ---\nGiornata non annotata.\n",
+        )
+        agent.notes = []
+        return
     except OpenRouterError as exc:
         log_error("memory", f"{aid} day{day} consolidation failed: {exc}")
         return
@@ -263,22 +340,7 @@ async def _consolidate_one(
 
     weekday = _weekday_italian(state, day)
     addition = f"\n\n--- Giorno {day}, {weekday} ---\n{body.strip()}\n"
-
-    # Atomic append in SQL: trim trailing whitespace, concat the day entry.
-    # rtrim with the whitespace set strips any combination of spaces / tabs /
-    # newlines that may have accumulated, mirroring Python's str.rstrip().
-    async with pool().acquire() as conn:
-        await conn.execute(
-            """
-            update agent_memory
-               set content = rtrim(content, E' \\t\\n\\r') || $3,
-                   updated_at = now()
-             where run_id = $1 and agent_id = $2
-            """,
-            state.run_id,
-            aid,
-            addition,
-        )
+    await _append_memory(state.run_id, aid, addition)
     log("memory", f"{aid} day{day} consolidated ({len(body)}ch)")
 
     # Clear the intra-day scratchpad — today's thoughts have been absorbed.

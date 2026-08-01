@@ -10,9 +10,11 @@ import httpx
 
 from .config import (
     AGENT_FALLBACK_MODELS,
+    DISABLE_MODEL_REASONING,
     MODEL_PRICING_USD_PER_M_TOKENS,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
+    UNKNOWN_MODEL_PRICING_USD_PER_M_TOKENS,
 )
 from .logging_utils import log, log_error
 from .models import RunState
@@ -47,6 +49,12 @@ async def _single_call(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    # See DISABLE_MODEL_REASONING in config.py: reasoning tokens are charged as
+    # output and are spent BEFORE any content, so under AGENT_MAX_TOKENS a
+    # reasoning model returns an empty activation. Ignored by models that
+    # don't reason.
+    if DISABLE_MODEL_REASONING:
+        payload["reasoning"] = {"enabled": False}
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -93,7 +101,9 @@ async def _single_call(
 def _estimate_cost_usd(model: str, usage: dict[str, Any]) -> float:
     prompt = int(usage.get("prompt_tokens") or 0)
     completion = int(usage.get("completion_tokens") or 0)
-    in_rate, out_rate = MODEL_PRICING_USD_PER_M_TOKENS.get(model, (0.0, 0.0))
+    in_rate, out_rate = MODEL_PRICING_USD_PER_M_TOKENS.get(
+        model, UNKNOWN_MODEL_PRICING_USD_PER_M_TOKENS
+    )
     return (prompt / 1_000_000.0 * in_rate) + (completion / 1_000_000.0 * out_rate)
 
 

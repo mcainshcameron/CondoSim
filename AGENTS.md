@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project
 
@@ -35,11 +35,6 @@ python scripts/dev_server.py        # real server + scripted LLM, for UI work
 
 # --- Costs real money ---------------------------------------------------
 python scripts/run_smoketest.py     # end-to-end, real OpenRouter calls
-
-# Voice/independence eval — real LLM, ~$0.10 for 5 days. Run BEFORE and AFTER
-# any prompt change; --run-id is pinned so both see the same schedule.
-python scripts/eval_voices.py --days 5 --label before --dump before.txt
-python scripts/eval_voices.py --days 5 --label after  --dump after.txt
 
 # Transcript analysis / canary check on any saved run
 python -m backend.analyze data/runs/<run_id>.json --out report.md
@@ -150,24 +145,6 @@ Unknown models fall back to a deliberately *expensive* rate
 (`UNKNOWN_MODEL_PRICING_USD_PER_M_TOKENS`) — an unpriced model must
 over-estimate, or its spend is invisible and the cap never fires.
 
-**Reasoning is disabled globally** (`DISABLE_MODEL_REASONING`, sent as
-`reasoning: {"enabled": false}` from `openrouter._single_call`). This is
-load-bearing, not a preference: reasoning tokens are billed as output and
-are spent *before* any content, so against `AGENT_MAX_TOKENS` (180) a
-reasoning model returns `finish_reason="length"` with **empty content** —
-a silently failed activation that logs as a normal 200. Measured on the
-real prompt: DeepSeek V4 Flash 0/6 activations with reasoning on vs 6/6
-off; Grok 4.3 1/6 (~628 reasoning tokens). OpenRouter accepts and ignores
-the parameter on non-reasoning models, so it ships unconditionally.
-`reasoning: {"effort": "minimal"}` does **not** work — only the explicit
-disable does.
-
-**Before adopting any new model, check two things the catalog won't tell
-you:** that it actually emits `tool_calls` rather than a prose reply (a
-text answer is a no-op in this loop — `google/gemini-2.5-flash-lite`
-writes excellent Italian and fails this 0/6), and that it produces output
-under `AGENT_MAX_TOKENS`. Both fail *silently*.
-
 ### Activation loop (`backend/agent.py`)
 
 Per wake-up: `build_system_prompt` (SOUL + windowed MEMORY + admin_goal +
@@ -176,16 +153,6 @@ every chat the agent is in straight into the prompt →
 `build_notification_prompt` (clock, world event + mood cue, digest,
 `_thread_status`, notes, three-options framing) → tool loop capped at
 `MAX_TOOL_CALLS_PER_ACTIVATION` (3).
-
-**A turn spent narrating is not a turn spent choosing silence.** When the
-model answers in prose instead of calling a tool, the loop nudges once
-("hai pensato, ma non hai toccato il telefono") and lets it retry, rather
-than discarding the activation. Dropping it was invisible — it looked like
-the resident chose to stay quiet, when the harness had thrown their turn
-away. It cost the models most prone to thinking out loud almost all their
-output: a 5-day eval had Greco and Ferrari on 1 message each while
-Marchetti sent 10. The nudge fires at most once per activation and only
-while nothing has landed yet.
 
 **Most activations are ONE LLM call.** Two changes got them there:
 
@@ -288,16 +255,9 @@ Two enforcement layers:
    proposing in-person meetings (`ci vediamo`, `passa da me`, `facciamo un
    caffè`, etc.). The condo exists **only in chat**.
 
-Cross-agent near-duplicate detection has been **removed**: the round-robin
-scheduler prevents the parallel-activation race that produced near-dupes in
-the first place, so the post-hoc fingerprint regex is no longer
-load-bearing. **Self**-repetition is a different failure and is still
-blocked (`_is_self_repeat`): an agent whose point drew no reply will
-otherwise post it again a round later, verbatim or with extra emoji. Scoped
-to same agent + same chat + same day, and short interjections ("ok", "mah")
-are exempt. Unlike a content-rule violation it does NOT set `ctx.done` —
-the useful outcome is a rephrase or a DM, and ending the turn would
-recreate the silence it exists to fix.
+Near-duplicate detection has been **removed**: the round-robin scheduler
+prevents the parallel-activation race that produced near-dupes in the
+first place, so the post-hoc fingerprint regex is no longer load-bearing.
 Content rule violations still set `ctx.done = True` and end the activation
 (prevents the "tack on a different tail to slip past the filter"
 workaround). DM cooldown refusals do NOT end the activation.
@@ -410,28 +370,7 @@ See docs/IMPLEMENTATION.md §6 for the full list. Highlights:
 - Message volume is prompt-sensitive (±3× for small wording changes) —
   prefer instrumentation over re-tuning token caps blind. The brevity
   examples in `build_system_prompt` are load-bearing; the procedural block
-  in `build_notification_prompt` is the safe place to edit. **Length is
-  sensitive to that block too**: adding the options menu pushed median
-  message length 102 → 130 chars until a one-line brevity reminder was
-  restated at the decision point. Run `scripts/eval_voices.py` either side
-  of any edit here.
-- **The closing options menu decides which tools get used at all.** While it
-  listed only "messaggio / reazione / metti giù il telefono", a 5-day eval
-  produced 21 main-chat messages and ZERO DMs and ZERO motions — five
-  help-desks, not five neighbours. Listing the private channel took it to 7
-  DM messages across 2 threads and produced an actual Greco↔Marchetti
-  alliance. Anything you want the residents to *do* has to be on that menu.
-- **Initiative must be aimed at real material or it becomes fabrication.** A
-  first attempt at the independence nudge just said "bring your own topic";
-  with nothing real to raise, residents invented building events and past
-  conversations ("una settimana fa nel gruppo…", on day 2). Pointing it at
-  concrete sources — your unanswered question, what a neighbour said, what
-  you noticed today — took invented-history hits to 0.
-- Ambient world events (`atmosphere.py`, `data/world_events.json`) are
-  **legitimate** shared facts. A resident discussing the electricity bill on
-  the day the event fires is the system working, not fabrication — don't
-  "fix" it. Check `atmosphere.pick_world_event(state)` for the day before
-  concluding anything was invented.
+  in `build_notification_prompt` is the safe place to edit.
 - UI MEMORY viewer doesn't auto-refresh on `memory_consolidation_done`.
 - Only one building authored (`001`, Condominio Via Garibaldi); the UI
   hardcodes it as default payload.

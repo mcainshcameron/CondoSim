@@ -3,12 +3,19 @@ from __future__ import annotations
 
 import json
 
-from . import memory
-from .config import AGENT_MAX_TOKENS, AGENT_TEMPERATURE, MAX_TOOL_CALLS_PER_ACTIVATION
+from . import atmosphere, memory, timeline
+from .config import (
+    AGENT_MAX_TOKENS,
+    AGENT_TEMPERATURE,
+    DM_CONTEXT,
+    MAIN_CHAT_CONTEXT,
+    MAX_TOOL_CALLS_PER_ACTIVATION,
+    MEMORY_DAYS_IN_PROMPT,
+)
 from .events import bus
+from .llm import BudgetExceeded, OpenRouterError, complete
 from .logging_utils import log, log_error
 from .models import Agent, Message, RunState
-from .openrouter import OpenRouterError, chat_completion, record_usage
 from .tools import TOOL_SCHEMAS, ToolContext, dispatch_tool, contains_forbidden
 
 
@@ -25,7 +32,11 @@ async def build_system_prompt(state: RunState, agent: Agent) -> str:
     """
     p = agent.persona
     soul = memory.read_soul(state, p.id)
-    memory_text = await memory.read_memory(state, p.id)
+    # Window the diary: the seed plus recent days. Keeps the prompt (and
+    # therefore per-activation cost) flat as a run gets long.
+    memory_text = memory.window_memory(
+        await memory.read_memory(state, p.id), MEMORY_DAYS_IN_PROMPT
+    )
 
     lines = [
         f"Sei {p.display_name}. Vivi in {p.unit} del Condominio Via Garibaldi, a Milano.",
@@ -66,6 +77,13 @@ async def build_system_prompt(state: RunState, agent: Agent) -> str:
         "- Non proporre caffè, incontri, appuntamenti. Non scrivere \"passa da me\", \"vediamoci\", \"ci vediamo alle...\", \"arrivo subito\", \"ti aspetto\", \"scendo\". Tutto quello che vuoi dire o chiedere, lo scrivi in chat.",
         "- Le assemblee condominiali esistono solo come cornice per votare le mozioni depositate dal telefono. Non ti ci siedi davvero.",
         "- L'amministratore è la voce ufficiale del palazzo: quando riporta un fatto (un preventivo, una scadenza, un evento accaduto, una segnalazione ricevuta, la visita della polizia, un incendio, una separazione di qualcuno, una lettera anonima), quello che racconta è **vero nel tuo mondo** — l'evento è successo come lo descrive, le cifre sono quelle, le persone citate esistono davvero. Puoi criticare le sue scelte, la sua gestione, il suo tono, perfino la sua persona — quello è legittimo. Ma non metti in dubbio che i fatti che riporta siano reali: se dice che è passata la polizia, è passata; se dice €67.400, sono €67.400; se dice che è scoppiato un incendio alle 03:15, è scoppiato.",
+        # Counterpart to the rule above. Without it the residents invent shared
+        # building facts and then reason from them as established: a 5-day eval
+        # produced a "new lift" that had only ever been under maintenance, and
+        # an electricity bill with invented figures (540 vs 380) that nobody
+        # had received. One resident's invention becomes the group's premise
+        # within two turns, and the admin's actual storyline gets buried.
+        "- Al contrario, **i fatti nuovi sul palazzo non li inventi tu**. Non annunciare eventi collettivi che nessuno ti ha detto (una bolletta arrivata, un lavoro finito, un preventivo nuovo, una decisione presa, cifre precise che nessuno ha dato). Puoi raccontare quello che hai notato **tu**, nel tuo appartamento o sulle tue scale, e puoi supporre, sospettare, esagerare — ma allora si sente che è una tua impressione (\"mi sa che…\", \"secondo me…\"), non un annuncio. Se una cosa non l'ha detta l'amministratore e non l'hai vista tu, non è ancora successa.",
         "",
         "Come scrivi:",
         "- Italiano colloquiale, in chat WhatsApp. **Lunghezza vera di WhatsApp**: la maggior parte dei messaggi sono cortissimi. Esempi realistici di quello che scrivi:",
@@ -98,6 +116,19 @@ def build_notification_prompt(
     parts = [
         f"{now_str}. Dai un'occhiata al telefono.",
     ]
+
+    # Ambient texture, both derived (no LLM cost). The world event is the
+    # same for everyone — it's a fact about the building, not a prompt — so
+    # residents can corroborate each other naturally. The mood cue is
+    # personal, read off what happened to this resident yesterday.
+    scene: list[str] = []
+    if state.world_event_today:
+        scene.append(state.world_event_today)
+    cue = atmosphere.mood_cue(state, agent)
+    if cue:
+        scene.append(cue)
+    if scene:
+        parts.extend(["", " ".join(scene)])
 
     # Front-load any unanswered admin DMs so the agent sees them before
     # scrolling through the rest of the inbox. This is the strongest
@@ -177,19 +208,46 @@ def build_notification_prompt(
     # "non rispondere all'amministratore se gli altri l'hanno già fatto"
     # framing, which was a v1 anti-pile-on rule that round-robin makes
     # obsolete and that was suppressing legitimate group answers.
+    # Kept deliberately compact: this block is re-sent on every single
+    # activation, and the procedural guidance below used to run ~400 tokens.
+    # The *brevity* examples stay in the system prompt untouched — message
+    # length is very sensitive to that wording (docs/IMPLEMENTATION.md §6).
+    # The menu of options is load-bearing: the model picks from what is
+    # actually listed here. When this block offered only "messaggio / reazione
+    # / metti giù il telefono", a 5-day eval produced 21 main-chat messages,
+    # ZERO private messages and ZERO motions — five help-desks answering the
+    # admin in turn, rather than five neighbours with their own agendas. The
+    # private channel has to be on the menu to get used.
     parts.extend([
         "",
-        "Come funziona una chat di gruppo del condominio:",
-        "  • Se l'amministratore fa una domanda al gruppo o ti tocca direttamente, rispondi — la tua voce conta, anche se uno o due vicini hanno già scritto. Bastano poche parole tue (\"tutto ok\", \"per me sì\", \"non lo so\"). Quello che NON va bene è non rispondere proprio.",
-        "  • Quando un altro vicino ha già fatto la TUA stessa domanda all'amministratore, non riformularla con parole tue: meglio una reazione emoji al suo messaggio (👍 / 🙄 / 😡 a seconda di come la pensi), o aggiungere un dettaglio tuo se ce l'hai.",
-        "  • Quando la conversazione si è già spostata tra voi vicini (confronto, battibecco, alleanza), partecipa lì — non riportarla artificialmente verso l'amministratore.",
+        "Ora scegli cosa fare. Vanno bene tutte:",
+        "  • un messaggio nel gruppo;",
+        "  • un messaggio privato a un vicino (le cose che non diresti davanti a tutti si dicono qui: un sospetto, un'alleanza, una lamentela su qualcuno, una domanda diretta);",
+        "  • una reazione emoji a un vicino;",
+        "  • una mozione, se c'è davvero qualcosa da mettere ai voti;",
+        "  • oppure metti giù il telefono.",
         "",
-        "Le tre azioni del telefono, tutte legittime:",
-        "  • Scrivere un messaggio breve quando hai qualcosa di tuo da dire o quando ti hanno chiesto qualcosa.",
-        "  • Una reazione emoji (👍 ❤️ 😂 🙄 😡 ...) a un vicino per dire \"ho letto\" / \"d'accordo\" / \"non sono d'accordo\" senza scrivere.",
-        "  • Mettere giù il telefono se davvero non c'è niente che ti riguardi adesso (ma se l'amministratore ti ha chiesto qualcosa, rispondi con parole tue).",
+        "  • Se l'amministratore ha chiesto qualcosa a te o al gruppo, rispondi con parole tue — anche solo \"per me sì\", \"non lo so\". Non rispondere affatto è l'unica cosa che non va.",
+        "  • Se un vicino ha già detto quello che volevi dire tu, non riformularlo: reagisci al suo messaggio (👍 🙄 😡) oppure aggiungi il dettaglio che hai solo tu.",
+        "  • Se il discorso si è spostato tra vicini, resta lì — non riportarlo all'amministratore per forza.",
+        # Independence, but pointed at material that actually exists. An
+        # earlier version of this line just said "bring your own topic", and
+        # the residents — having nothing real to raise — started inventing
+        # building events and past conversations to have something to say
+        # ("una settimana fa nel gruppo c'era chi spingeva per…", on day 2).
+        # Initiative has to be aimed at real material or it becomes fiction.
+        "  • Non aspettare che sia l'amministratore a darti il tema: puoi muoverti tu, anche in privato. Ma parti da qualcosa che esiste davvero — una tua domanda rimasta senza risposta, qualcosa che un vicino ha detto e non ti è andato giù, una cosa che hai notato tu oggi, un tuo interesse. Non inventarti fatti nuovi del palazzo per avere di che parlare.",
         "",
-        "Fai quello che faresti davvero nei panni di chi sei — non esagerare, ma non fare finta di non vedere quando ti interessa sul serio.",
+        "Non ripetere una cosa che hai già scritto tu: se l'hai già detta e nessuno ha risposto, o la dici in un altro modo, o la porti in privato a qualcuno, o lasci perdere.",
+        "",
+        # Restated at the decision point on purpose. The brevity examples live
+        # in the system prompt (and are load-bearing — see IMPLEMENTATION §6),
+        # but they sit far above the inbox digest by the time the model
+        # chooses. Adding the options menu above pushed median message length
+        # from 102 to 130 chars until this line went back in.
+        "Scrivi corto. Una o due righe. Se ti accorgi che stai spiegando, taglia.",
+        "",
+        "Fai quello che faresti davvero nei panni di chi sei. Non recitare.",
     ])
     return "\n".join(parts)
 
@@ -288,7 +346,7 @@ def _latest_unanswered_admin_in_main(state: RunState, agent: Agent, now: int) ->
             continue
         if m.fictional_timestamp_minutes > now:
             continue
-        if candidate is None or m.fictional_timestamp_minutes > candidate.fictional_timestamp_minutes:
+        if candidate is None or timeline.sort_key(m) > timeline.sort_key(candidate):
             candidate = m
     if candidate is None:
         return None
@@ -297,7 +355,7 @@ def _latest_unanswered_admin_in_main(state: RunState, agent: Agent, now: int) ->
     for m in state.messages:
         if m.chat_id != candidate.chat_id or m.sender_id != aid:
             continue
-        if m.fictional_timestamp_minutes > candidate.fictional_timestamp_minutes:
+        if timeline.sort_key(m) > timeline.sort_key(candidate):
             return None
     return candidate
 
@@ -318,7 +376,7 @@ def _admin_dms_awaiting_reply(state: RunState, agent: Agent, now: int) -> list[t
                 if m.chat_id == chat.id and m.fictional_timestamp_minutes <= now]
         if not msgs:
             continue
-        msgs.sort(key=lambda m: m.fictional_timestamp_minutes)
+        msgs.sort(key=timeline.sort_key)
         last = msgs[-1]
         # If the most recent message in this DM is from admin, the agent
         # owes a reply.
@@ -376,7 +434,7 @@ def _thread_status(ctx: ToolContext, agent: Agent) -> str:
             continue
         if chat.id in awaiting_chat_ids:
             continue  # already covered as a front_block
-        msgs = sorted(by_chat.get(chat.id, []), key=lambda m: m.fictional_timestamp_minutes)
+        msgs = sorted(by_chat.get(chat.id, []), key=timeline.sort_key)
         own_idx = [i for i, m in enumerate(msgs) if m.sender_id == aid]
         if not own_idx:
             continue  # haven't spoken here yet, nothing to remind about
@@ -471,7 +529,9 @@ async def activate_agent(
     )
 
     system_prompt = await build_system_prompt(state, agent)
-    inbox_text = dispatch_tool(ctx, "read_inbox", {})
+    # Pre-read the chats into the prompt instead of making the model spend a
+    # round trip on read_inbox/read_chat.
+    inbox_text = build_context_digest(ctx, agent)
     notes_summary = _summarize_notes(agent)
     user_prompt = build_notification_prompt(
         ctx, agent, inbox_text, notes_summary, forced_for_admin=forced_for_admin
@@ -482,6 +542,7 @@ async def activate_agent(
         {"role": "user", "content": user_prompt},
     ]
 
+    nudged_no_tool = False  # one corrective retry per activation, see below
     log("agent", f"activate {agent_id} @day{state.clock.day}/min{fictional_minutes_now} model={agent.model}")
     bus().publish(state.run_id, "typing_start", {
         "agent_id": agent_id,
@@ -491,7 +552,8 @@ async def activate_agent(
     })
     for step in range(MAX_TOOL_CALLS_PER_ACTIVATION):
         try:
-            assistant_msg = await chat_completion(
+            assistant_msg = await complete(
+                state=state,
                 model=agent.model,
                 messages=messages,
                 tools=TOOL_SCHEMAS,
@@ -499,7 +561,11 @@ async def activate_agent(
                 max_tokens=AGENT_MAX_TOKENS,
                 caller=f"agent:{agent_id}:step{step}",
             )
-            record_usage(state, assistant_msg)
+        except BudgetExceeded as exc:
+            log_error("agent", f"{agent_id} budget stop: {exc}")
+            ctx.blocked_sends.append({"error": str(exc), "kind": "budget"})
+            ctx.budget_exceeded = exc.reason
+            break
         except OpenRouterError as exc:
             log_error("agent", f"{agent_id} OpenRouter failure: {exc}")
             ctx.blocked_sends.append({"error": str(exc), "kind": "openrouter"})
@@ -519,7 +585,38 @@ async def activate_agent(
             ctx.blocked_sends.append({"free_text_leak": content[:200]})
 
         if not tool_calls:
-            # Model answered in plain text without calling a tool — close phone.
+            # The model narrated instead of touching the phone ("Osservo la
+            # notifica, valuto la situazione…", sometimes in English). v1 threw
+            # the whole activation away here, which is why the models most
+            # prone to thinking out loud went nearly mute: Greco and Ferrari
+            # managed 1 message each across a 5-day eval while Marchetti sent
+            # 10. A dropped turn is invisible — it looks like the resident
+            # chose silence, when really the harness discarded their turn.
+            #
+            # So: nudge once and let them try again. Only once, and only if
+            # nothing has landed yet — a model that already sent something and
+            # then adds a closing remark is genuinely finished.
+            produced_so_far = (
+                len(ctx.sent_messages_this_activation)
+                + len(ctx.reactions_added_this_activation)
+            )
+            if not nudged_no_tool and produced_so_far == 0 and step + 1 < MAX_TOOL_CALLS_PER_ACTIVATION:
+                nudged_no_tool = True
+                log("agent", f"{agent_id} step{step} no tool_calls, nudging once "
+                             f"(content={len(content)}ch)")
+                messages.append({"role": "assistant", "content": content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Hai pensato, ma non hai toccato il telefono — quindi "
+                        "in chat non è arrivato niente. Se vuoi dire qualcosa "
+                        "usa il telefono adesso (un messaggio nel gruppo, un "
+                        "messaggio privato a un vicino, o una reazione). Se "
+                        "invece davvero non ti va di rispondere, chiudi con "
+                        "done."
+                    ),
+                })
+                continue
             log("agent", f"{agent_id} step{step} no tool_calls, closing (content={len(content)}ch)")
             ctx.done = True
             break
@@ -530,6 +627,10 @@ async def activate_agent(
             "content": content,
             "tool_calls": tool_calls,
         })
+        produced_before = (
+            len(ctx.sent_messages_this_activation)
+            + len(ctx.reactions_added_this_activation)
+        )
         for tc in tool_calls:
             fn = tc.get("function", {})
             name = fn.get("name", "")
@@ -550,6 +651,25 @@ async def activate_agent(
         if ctx.done:
             break
 
+        # Implicit `done`. If the agent actually put something into the world
+        # this batch — a message, a forward, an emoji — the activation is
+        # complete. v1 spent a second LLM call (a full prompt re-send) purely
+        # to let the model say `done`, which roughly doubled the latency and
+        # cost of every wake-up.
+        #
+        # The check is on what LANDED, not on what was attempted: a send
+        # refused by containment or the DM cooldown produces nothing, so the
+        # loop continues and the model can rewrite or bow out. That keeps the
+        # acknowledgment guarantee intact.
+        produced_after = (
+            len(ctx.sent_messages_this_activation)
+            + len(ctx.reactions_added_this_activation)
+        )
+        if produced_after > produced_before:
+            log("agent", f"{agent_id} step{step} produced output, implicit done")
+            ctx.done = True
+            break
+
     log(
         "agent",
         f"{agent_id} activation done: sent={len(ctx.sent_messages_this_activation)} "
@@ -561,6 +681,68 @@ async def activate_agent(
         "sent": len(ctx.sent_messages_this_activation),
     })
     return ctx
+
+
+def build_context_digest(ctx: ToolContext, agent: Agent) -> str:
+    """Pre-read the agent's chats straight into the prompt.
+
+    v1 gave the model a notification *summary* (counts + a one-line preview),
+    so a model that wanted to know what was actually said had to spend a
+    `read_chat` call — and a tool call costs a whole extra round trip, which
+    re-sends the entire system prompt. Inlining the recent transcript is
+    strictly cheaper than that second call (input tokens are ~6x cheaper than
+    a duplicated prompt) and removes 1-2 seconds of serial latency from most
+    activations.
+
+    Volume is bounded: the group chat gets the last MAIN_CHAT_CONTEXT
+    messages, each DM the last DM_CONTEXT.
+    """
+    state = ctx.state
+    aid = agent.persona.id
+    now = ctx.current_fictional_minutes
+    current_day = state.clock.day
+
+    by_chat: dict[str, list[Message]] = {}
+    for m in state.messages:
+        if m.fictional_timestamp_minutes > now:
+            continue
+        by_chat.setdefault(m.chat_id, []).append(m)
+
+    blocks: list[str] = []
+    for chat in state.chats:
+        if aid not in chat.member_ids:
+            continue
+        msgs = sorted(by_chat.get(chat.id, []), key=timeline.sort_key)
+        if not msgs:
+            continue
+        limit = MAIN_CHAT_CONTEXT if chat.kind in ("main", "group", "assembly") else DM_CONTEXT
+        window = msgs[-limit:]
+        # Where does "new since you last looked" start? Everything after the
+        # agent's own most recent message in this chat.
+        own_positions = [i for i, m in enumerate(window) if m.sender_id == aid]
+        first_unread = own_positions[-1] + 1 if own_positions else 0
+
+        lines = [f"— {chat.display_name} —"]
+        if len(msgs) > len(window):
+            lines.append(f"  (…{len(msgs) - len(window)} messaggi più vecchi, apri la chat se ti servono)")
+        for i, m in enumerate(window):
+            when = _fmt_when(m.day, current_day, m.fictional_timestamp_minutes)
+            who = "tu" if m.sender_id == aid else m.sender_display_name
+            marker = "› " if (i >= first_unread and m.sender_id != aid) else "  "
+            body = m.content.strip().replace("\n", " ")
+            reacts = "".join(
+                f" {emoji}×{len(ids)}" if len(ids) > 1 else f" {emoji}"
+                for emoji, ids in (m.reactions or {}).items() if ids
+            )
+            lines.append(f"{marker}[{when}] {who}: {body}{reacts}")
+        blocks.append("\n".join(lines))
+
+    if not blocks:
+        return "Il telefono è muto: nessun messaggio."
+    return (
+        "Quello che c'è sul telefono adesso (› = arrivato dopo il tuo ultimo "
+        "messaggio in quella chat):\n\n" + "\n\n".join(blocks)
+    )
 
 
 def _summarize_notes(agent: Agent) -> str:

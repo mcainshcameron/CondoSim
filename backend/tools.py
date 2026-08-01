@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import uuid4
 
-from . import dials
+from . import dials, timeline
 from .events import bus
 from .models import Chat, Message, Motion, RunState
 
@@ -101,6 +101,41 @@ def _content_rule_violation(text: str) -> tuple[str, str] | None:
         if p in low:
             return ("meeting", p)
     return None
+
+
+def _normalize_for_repeat(text: str) -> str:
+    """Collapse a message to a comparable core: lowercase, no emoji, no
+    punctuation, single-spaced. Repeating yourself with three more 🙄 on the
+    end is still repeating yourself."""
+    low = (text or "").lower()
+    kept = [c for c in low if c.isalnum() or c.isspace()]
+    return " ".join("".join(kept).split())
+
+
+def _is_self_repeat(ctx: "ToolContext", chat_id: str, text: str) -> bool:
+    """True if this agent already said essentially this in this chat today.
+
+    Cross-agent near-duplicate detection was removed with the v1 cascade —
+    round-robin means B sees A's message before B speaks, so B no longer
+    blindly reformulates it. SELF-repetition is a different failure and
+    survived: an agent whose point got no reply simply posts it again a round
+    later. A 5-day eval caught a resident sending a byte-identical message
+    twice in one day, then a third time with extra emoji. Nothing upstream
+    prevents this — the agent's own earlier message is in its context, but a
+    model with nothing new to say will restate rather than stay quiet.
+    """
+    core = _normalize_for_repeat(text)
+    if len(core) < 12:  # "ok", "mah", "non mi convince" — repetition is fine
+        return False
+    state = ctx.state
+    for m in state.messages:
+        if m.sender_id != ctx.agent_id or m.chat_id != chat_id:
+            continue
+        if m.day != state.clock.day:
+            continue
+        if _normalize_for_repeat(m.content) == core:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +348,9 @@ class ToolContext:
     reactions_added_this_activation: list[tuple[str, str]] = field(default_factory=list)
     blocked_sends: list[dict] = field(default_factory=list)  # containment audit
     done: bool = False
+    # Set to a BudgetExceeded reason when a spend cap stopped this
+    # activation. The scheduler reads it to end the run cleanly.
+    budget_exceeded: str | None = None
     # Tracks which chats the agent has already opened this activation so
     # we don't return the same long dump twice in one turn.
     chats_read_this_activation: set = field(default_factory=set)
@@ -410,7 +448,7 @@ def _last_message_in_chat(state: RunState, chat_id: str, now: int | None = None)
             continue
         if now is not None and m.fictional_timestamp_minutes > now:
             continue
-        if best is None or m.fictional_timestamp_minutes > best.fictional_timestamp_minutes:
+        if best is None or timeline.sort_key(m) > timeline.sort_key(best):
             best = m
     return best
 
@@ -490,7 +528,7 @@ def tool_read_inbox(ctx: ToolContext) -> str:
         # may have inserted them out of order.
         chat_msgs = sorted(
             (m for m in state.messages if m.chat_id == chat.id and m.fictional_timestamp_minutes <= now),
-            key=lambda m: m.fictional_timestamp_minutes,
+            key=timeline.sort_key,
         )
         unread: list[Message] = []
         seen_cursor = last_seen is None
@@ -537,7 +575,7 @@ def tool_read_chat(ctx: ToolContext, chat_id: str, limit: int = 30) -> str:
         m for m in state.messages
         if m.chat_id == chat.id and m.fictional_timestamp_minutes <= now
     ]
-    msgs.sort(key=lambda m: m.fictional_timestamp_minutes)
+    msgs.sort(key=timeline.sort_key)
     msgs = msgs[-max(1, limit):]
     if not msgs:
         return f"La chat \"{chat.display_name}\" è vuota."
@@ -577,6 +615,16 @@ def tool_send_message(ctx: ToolContext, chat_id: str, text: str) -> str:
         return (
             f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
             f"di persona — solo chat. Metti giù il telefono."
+        )
+    if _is_self_repeat(ctx, chat.id, text):
+        # Deliberately does NOT set ctx.done: unlike a content-rule violation
+        # there's no filter to game here, and the useful outcome is that the
+        # agent says the SAME thing differently, takes it to a DM, or drops it.
+        # Ending the activation would just recreate the silence we're fixing.
+        return (
+            "Questo l'hai già scritto oggi in questa chat, uguale. Non "
+            "rimandarlo: o lo dici in un altro modo, o lo porti in privato a "
+            "qualcuno, o lasci perdere e metti giù il telefono."
         )
     if _dm_cooldown_active(state, chat, ctx.agent_id, ctx.current_fictional_minutes):
         return (
@@ -645,6 +693,11 @@ def tool_send_dm(ctx: ToolContext, recipient_id: str, text: str) -> str:
         return (
             f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
             f"di persona — solo chat. Metti giù il telefono."
+        )
+    if _is_self_repeat(ctx, dm_chat.id, text):
+        return (
+            f"Questo l'hai già scritto oggi a {_display_for(state, recipient_id)}, "
+            f"uguale. O glielo dici in un altro modo, o lasci perdere."
         )
     if _dm_cooldown_active(state, dm_chat, ctx.agent_id, ctx.current_fictional_minutes):
         return (
@@ -839,7 +892,7 @@ def _find_message_in_chat_by_excerpt(
         m for m in state.messages
         if m.chat_id == chat_id and (now is None or m.fictional_timestamp_minutes <= now)
     ]
-    candidates.sort(key=lambda m: (m.fictional_timestamp_minutes, m.wall_clock_iso, m.id))
+    candidates.sort(key=timeline.sort_key)
     # Prefer exact substring match
     for m in reversed(candidates):
         if ex in m.content.lower():
@@ -948,8 +1001,9 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
         )
 
     # Build message with forward metadata
-    state.clock.minutes_since_start = max(state.clock.minutes_since_start, ctx.current_fictional_minutes)
-    ctx.current_fictional_minutes += random.randint(1, 3)
+    ctx.current_fictional_minutes = timeline.allocate_minute(
+        state, ctx.current_fictional_minutes + random.randint(1, 3)
+    )
     audience = [mid for mid in target_chat.member_ids if mid != ctx.agent_id]
     fmsg = Message(
         id=f"msg_{uuid4().hex[:8]}",
@@ -959,6 +1013,7 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
         sender_display_name=_display_for(state, ctx.agent_id),
         content=body,
         fictional_timestamp_minutes=ctx.current_fictional_minutes,
+        seq=timeline.next_seq(state),
         wall_clock_iso=datetime.utcnow().isoformat() + "Z",
         day=state.clock.day,
         audience=audience,
@@ -1104,6 +1159,11 @@ def _create_and_append_message(
     state = ctx.state
     # Typing delay: 1–4 fictional minutes between messages from the same agent
     ctx.current_fictional_minutes += random.randint(1, 4)
+    # Never stamp earlier than the newest message already in the run — an
+    # admin post that landed mid-activation must not end up below this one.
+    ctx.current_fictional_minutes = timeline.allocate_minute(
+        state, ctx.current_fictional_minutes
+    )
     # Audience: other chat members
     audience = [mid for mid in chat.member_ids if mid != sender_id]
     msg = Message(
@@ -1116,6 +1176,7 @@ def _create_and_append_message(
         sender_display_name=_display_for(state, sender_id),
         content=text,
         fictional_timestamp_minutes=ctx.current_fictional_minutes,
+        seq=timeline.next_seq(state),
         wall_clock_iso=datetime.utcnow().isoformat() + "Z",
         day=state.clock.day,
         audience=audience,

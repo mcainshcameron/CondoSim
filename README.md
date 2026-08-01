@@ -137,15 +137,23 @@ Copy `.env.example` to `.env` and fill in:
 
 ```
 OPENROUTER_API_KEY=sk-or-v1-...
-DATABASE_URL=postgresql://...   # Supabase pooler URL
+DATABASE_URL=postgresql://...   # Supabase pooler URL — optional locally
 ADMIN_PASSWORD=...              # for the login page
 SESSION_SECRET=...              # any random string
 SESSION_COOKIE_SECURE=0         # local http; omit for prod
+RUN_COST_CAP_USD=0.75           # per-run spend ceiling
+MONTHLY_COST_CAP_USD=8.0        # ceiling across all runs this month
 ```
 
-`OPENROUTER_API_KEY` and `DATABASE_URL` are required for any run (smoketest
-or server). `ADMIN_PASSWORD` + `SESSION_SECRET` are only needed if you want
-the login page; without them the API still works, the UI just can't log in.
+`OPENROUTER_API_KEY` is required for a real run. `DATABASE_URL` is required
+on Heroku but **optional locally** — leave it unset and state lives in
+memory (lost on restart). `ADMIN_PASSWORD` + `SESSION_SECRET` are only
+needed if you want the login page; without them the API still works, the UI
+just can't log in.
+
+The two cost caps are enforced *before* each LLM call, so a run stops itself
+with a clear message rather than hitting your OpenRouter credit limit. Keep
+`MONTHLY_COST_CAP_USD` below your key-level cap (€10 ≈ $11).
 
 ### 3. Install
 
@@ -157,6 +165,8 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 pip install -r requirements.txt
+# for the test suite:
+pip install -r requirements-dev.txt
 ```
 
 **Frontend:**
@@ -164,6 +174,20 @@ pip install -r requirements.txt
 cd frontend
 npm install
 ```
+
+## Develop without spending anything
+
+Three offline entry points. None needs an API key or a database:
+
+```bash
+pytest                                    # full suite, <1s
+python scripts/simulate_offline.py --days 10   # scheduling + ordering + prompt stats
+python scripts/dev_server.py              # the real server, scripted residents
+```
+
+`dev_server.py` is the one to use for UI work — the whole admin console
+works, residents say canned lines. Use a real run only when you need to
+judge dialogue quality.
 
 ## Run
 
@@ -186,14 +210,15 @@ Open http://localhost:5173.
    first message *is* the scenario — heating crisis, noise complaint,
    embezzlement, whatever you want). The backend creates the run.
 2. Read the opening message in the main chat (Condominio Via Garibaldi).
-3. Days advance automatically. Each day takes ~60–250s of OpenRouter
-   traffic; the topbar timer shows wall-clock elapsed and the chain
-   triggers off the `day_done` SSE event. Use ⏸ Pausa / ▶ Riprendi to
-   stop and resume.
+3. Days advance automatically, chaining off the `day_done` SSE event. Use
+   ⏸ **Pausa** / ▶ **Riprendi** to stop and resume the clock — pausing also
+   stops all spending. The speed selector (0.5× / 1× / 2× / ⚡) controls how
+   fast messages are revealed; ⚡ shows them the moment they arrive.
 4. Optionally post additional announcements, DM a resident, or set an
    admin goal from the admin console on the right. Mid-day admin actions
    are forced reactions: the audience must acknowledge before day end.
-5. Read the unfolding chat. Days continue up to 14.
+5. Read the unfolding chat. Runs continue until you pause, close the tab, or
+   a spend cap is reached — the topbar shows the running estimate.
 
 ## Configuration
 

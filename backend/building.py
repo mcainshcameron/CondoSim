@@ -23,7 +23,6 @@ from .config import DATA_DIR, DEFAULT_AGENT_MODEL
 from .models import (
     Agent,
     Chat,
-    ExternalContact,
     FictionalClock,
     Message,
     OwnerBrief,
@@ -140,6 +139,7 @@ def build_run_state(building_id: str, opening_text: str) -> RunState:
         sender_display_name="Amministratore",
         content=text,
         fictional_timestamp_minutes=8 * 60,  # Day 1 08:00
+        seq=1,
         wall_clock_iso=now_iso,
         day=1,
         audience=resident_ids,
@@ -160,4 +160,5 @@ def build_run_state(building_id: str, opening_text: str) -> RunState:
         chats=[main_chat],
         messages=[opening_msg],
         trust=trust,
+        next_seq=1,  # opening_msg consumed seq 1
     )

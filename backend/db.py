@@ -22,6 +22,20 @@ from .logging_utils import log, log_error
 _pool: asyncpg.Pool | None = None
 
 
+def has_database() -> bool:
+    """Is a Postgres backend configured?
+
+    When DATABASE_URL is unset the app runs against an in-process store
+    (`storage.py` / `memory.py` both fall back). That makes local dev and
+    the offline test suite runnable with zero infrastructure — the previous
+    hard requirement meant you could not even start the server, let alone
+    run a test, without a live Supabase URL.
+
+    Production always sets DATABASE_URL, so this never engages on Heroku.
+    """
+    return bool(os.getenv("DATABASE_URL", "").strip())
+
+
 def database_url() -> str:
     url = os.getenv("DATABASE_URL", "").strip()
     if not url:
@@ -37,6 +51,9 @@ def database_url() -> str:
 async def init_pool() -> None:
     global _pool
     if _pool is not None:
+        return
+    if not has_database():
+        log("db", "DATABASE_URL unset — using in-memory store (state is lost on restart)")
         return
     _pool = await asyncpg.create_pool(
         database_url(),

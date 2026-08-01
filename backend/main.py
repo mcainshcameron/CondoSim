@@ -7,7 +7,6 @@ import json
 import random
 from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -19,7 +18,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from . import memory
+from . import memory, timeline
 from .config import (
     ADMIN_PASSWORD,
     BACKEND_PORT,
@@ -39,7 +38,7 @@ from .events_pool import compute_suggestions
 from .logging_utils import log, log_error, tail_logs
 from .models import Message, Motion, RunState
 from .building import build_run_state
-from .scheduler import active_loop, advance_to_next_day, day_end_minutes, day_start_minutes, run_day, setup_day
+from .scheduler import active_loop, day_start_minutes, run_day, setup_day
 from .storage import load_run, save_run, state_lock
 
 
@@ -210,11 +209,21 @@ def _find_agent_or_404(state: RunState, agent_id: str):
 
 
 def _append_admin_message(state: RunState, chat_id: str, text: str, audience: list[str]) -> Message:
-    # Advance fictional time by a small amount so it sits after prior messages
-    state.clock.minutes_since_start = max(
+    """Append an admin-authored message at the front of the run's timeline.
+
+    The timestamp goes through `timeline.allocate_minute`, which floors it at
+    the newest message in the run. This matters because an admin can post
+    while an agent is mid-activation: `state.clock` only catches up to that
+    agent's messages once the activation finishes, so deriving the stamp from
+    the clock alone used to place the admin's message *before* messages the
+    browser had already rendered — the transcript then visibly reshuffled.
+    """
+    desired = max(
         state.clock.minutes_since_start + random.randint(1, 3),
         day_start_minutes(state.clock.day),
     )
+    stamp = timeline.allocate_minute(state, desired)
+    state.clock.minutes_since_start = max(state.clock.minutes_since_start, stamp)
     msg = Message(
         id=f"msg_{uuid4().hex[:8]}",
         chat_id=chat_id,
@@ -222,7 +231,8 @@ def _append_admin_message(state: RunState, chat_id: str, text: str, audience: li
         sender_kind="admin",
         sender_display_name="Amministratore",
         content=text.strip(),
-        fictional_timestamp_minutes=state.clock.minutes_since_start,
+        fictional_timestamp_minutes=stamp,
+        seq=timeline.next_seq(state),
         wall_clock_iso=datetime.utcnow().isoformat() + "Z",
         day=state.clock.day,
         audience=audience,

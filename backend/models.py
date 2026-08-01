@@ -90,6 +90,14 @@ class Message(BaseModel):
     sender_display_name: str
     content: str
     fictional_timestamp_minutes: int  # minutes since Day 1 00:00
+    # Per-run monotonic counter assigned at creation. Together with the
+    # fictional timestamp this forms a TOTAL order on the transcript:
+    # sort by (fictional_timestamp_minutes, seq) everywhere. Messages that
+    # share a minute keep the order they were generated in, so a client
+    # re-sort after a refetch can never reshuffle what the user already read.
+    # Defaults to 0 for rows written before the field existed;
+    # `timeline.backfill_seq` repairs those on load.
+    seq: int = 0
     wall_clock_iso: str  # runtime metadata, never sent to agents
     day: int
     audience: list[str] = Field(default_factory=list)
@@ -155,4 +163,14 @@ class RunState(BaseModel):
     # trust[speaker_id][listener_id] — nested dict for JSON sanity
     trust: dict[str, dict[str, float]] = Field(default_factory=dict)
     metrics: RunMetrics = Field(default_factory=RunMetrics)
+    # Allocator state for Message.seq — see backend/timeline.py.
+    next_seq: int = 0
+    # Ambient texture for the current day (see backend/atmosphere.py).
+    # `world_event_today` is shown to every resident as something they
+    # noticed themselves; `world_events_seen` stops a run repeating one.
+    world_event_today: str | None = None
+    world_events_seen: list[str] = Field(default_factory=list)
     ended: bool = False
+    # Why the run stopped, when it did: "cost_cap_exceeded",
+    # "monthly_budget_exhausted", or None while still playable.
+    ended_reason: str | None = None

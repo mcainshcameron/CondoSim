@@ -4,8 +4,15 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 
-from .db import pool
+from . import timeline
+from .db import has_database, pool
 from .models import RunState
+
+
+# In-memory fallback used when DATABASE_URL is unset (local dev / offline
+# tests). Stores the serialized JSON exactly like Postgres does, so a run
+# round-trips through the same validation path in both modes.
+_MEM_RUNS: dict[str, str] = {}
 
 
 # Per-run save mutex. Prevents concurrent save_run calls (scheduler batch +
@@ -32,6 +39,9 @@ def state_lock(run_id: str) -> asyncio.Lock:
 async def save_run(state: RunState) -> None:
     async with _save_locks[state.run_id]:
         payload = state.model_dump_json()
+        if not has_database():
+            _MEM_RUNS[state.run_id] = payload
+            return
         async with pool().acquire() as conn:
             await conn.execute(
                 """
@@ -47,13 +57,21 @@ async def save_run(state: RunState) -> None:
 
 
 async def load_run(run_id: str) -> RunState | None:
-    async with pool().acquire() as conn:
-        row = await conn.fetchrow(
-            "select state::text as state from runs where run_id = $1",
-            run_id,
-        )
-    if row is None:
-        return None
-    return RunState.model_validate_json(row["state"])
+    if not has_database():
+        payload = _MEM_RUNS.get(run_id)
+        state = RunState.model_validate_json(payload) if payload else None
+    else:
+        async with pool().acquire() as conn:
+            row = await conn.fetchrow(
+                "select state::text as state from runs where run_id = $1",
+                run_id,
+            )
+        state = RunState.model_validate_json(row["state"]) if row is not None else None
+    if state is not None:
+        # Runs saved before Message.seq existed deserialize with seq=0 for
+        # every message, which would collapse the tiebreaker. Reconstruct a
+        # stable order once, on load.
+        timeline.backfill_seq(state)
+    return state
 
 

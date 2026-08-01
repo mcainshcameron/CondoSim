@@ -22,11 +22,10 @@ All timing is fictional minutes since Day 1 00:00 — wall-clock-free.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import random
 
-from . import memory
+from . import atmosphere, memory, timeline
 from .agent import activate_agent
 from .config import (
     DAY_END_HOUR,
@@ -289,6 +288,9 @@ class DayLoop:
         self.state = state
         # agent_ids that owe a reaction to a fresh admin input.
         self.pending_admin_reactions: set[str] = set()
+        # Set to a BudgetExceeded reason as soon as a spend cap trips, which
+        # aborts the remaining rounds and ends the run.
+        self.budget_stop: str | None = None
 
     def _resident_ids(self) -> set[str]:
         return {a.persona.id for a in self.state.agents}
@@ -342,8 +344,12 @@ class DayLoop:
             target = win_start + i * tick + rng.randint(0, max(1, tick // 3))
             target = min(target, win_end - 1)
 
-            # Causality clamp: an agent can't act before events we know about.
-            clock_floor = self.state.clock.minutes_since_start
+            # Causality clamp: an agent can't act before anything already in
+            # the transcript. Floor on the newest MESSAGE, not on
+            # `state.clock` — the clock lags behind messages produced by an
+            # in-flight activation and by mid-day admin posts, so using it
+            # let an agent be stamped earlier than content they could see.
+            clock_floor = timeline.latest_minute(self.state)
             if target < clock_floor:
                 target = clock_floor
 
@@ -404,6 +410,10 @@ class DayLoop:
             except Exception as exc:
                 log_error("sched", f"{aid} activation failed: {exc!r}")
                 continue
+            if ctx.budget_exceeded:
+                self.budget_stop = ctx.budget_exceeded
+                log_error("sched", f"budget cap hit ({ctx.budget_exceeded}) — stopping day")
+                break
             acknowledged = bool(ctx.sent_messages_this_activation)
             if forced_reason is not None and not acknowledged:
                 # Forced agent closed the phone without sending.
@@ -435,6 +445,30 @@ class DayLoop:
             log_error("sched", f"end-of-round save_run failed: {exc!r}")
         return activated
 
+    async def _end_run_on_budget(self, total_activations: int) -> None:
+        """Terminate the run because a spend cap was reached.
+
+        Ends deliberately rather than crashing: the transcript stays intact,
+        the UI gets a reason to show, and no further LLM calls are made
+        (including the day-end memory consolidation, which would itself cost
+        one call per agent).
+        """
+        reason = self.budget_stop or "cost_cap_exceeded"
+        day = self.state.clock.day
+        self.state.ended = True
+        self.state.ended_reason = reason
+        log_error(
+            "sched",
+            f"=== DAY {day} ABORTED ({reason}) === activations={total_activations}",
+        )
+        _ACTIVE_LOOPS.pop(self.state.run_id, None)
+        await save_run(self.state)
+        bus().publish(self.state.run_id, "run_ended", {
+            "reason": reason,
+            "day": day,
+            "estimated_cost_usd": self.state.metrics.estimated_cost_usd,
+        })
+
     async def run(self) -> None:
         # Reset daily counters
         for a in self.state.agents:
@@ -442,7 +476,14 @@ class DayLoop:
 
         day = self.state.clock.day
         log("sched", f"=== DAY {day} START === rounds={ROUNDS_PER_DAY}")
-        bus().publish(self.state.run_id, "day_start", {"day": day})
+        # Today's ambient event, if any. Handed to every resident as
+        # something they noticed themselves — never posted as a system
+        # message. Costs nothing (no LLM call).
+        world_event = atmosphere.pick_world_event(self.state)
+        bus().publish(self.state.run_id, "day_start", {
+            "day": day,
+            "world_event": world_event,
+        })
         # Seed pending reactions from any uncascaded non-resident message.
         # Mirrors v1's "seed from any non-resident message that hasn't been
         # cascaded yet" behaviour — admin messages sent between days, during
@@ -464,6 +505,12 @@ class DayLoop:
                 ROUNDS_PER_DAY,
                 is_first_round=(round_idx == 0),
             )
+            if self.budget_stop:
+                break
+
+        if self.budget_stop:
+            await self._end_run_on_budget(total_activations)
+            return
 
         # Bonus drain rounds: admin may have posted very late in the day,
         # or some forced agents skipped earlier rounds because their turn
@@ -482,7 +529,7 @@ class DayLoop:
                     continue
                 # Bonus retries are spread across the remaining day so multiple
                 # owed agents don't all stamp the same minute.
-                base = max(self.state.clock.minutes_since_start + 5, day_end - 60)
+                base = max(timeline.latest_minute(self.state) + 5, day_end - 60)
                 target = min(base, day_end - 1)
                 log("sched", f"  {aid} BONUS activate @min{target}")
                 try:
@@ -493,6 +540,9 @@ class DayLoop:
                     log_error("sched", f"{aid} bonus activation failed: {exc!r}")
                     self.pending_admin_reactions.discard(aid)
                     continue
+                if ctx.budget_exceeded:
+                    self.budget_stop = ctx.budget_exceeded
+                    break
                 acknowledged = bool(ctx.sent_messages_this_activation)
                 if acknowledged:
                     self.pending_admin_reactions.discard(aid)
@@ -508,6 +558,11 @@ class DayLoop:
                 await save_run(self.state)
             except Exception as exc:
                 log_error("sched", f"bonus-round save_run failed: {exc!r}")
+            if self.budget_stop:
+                break
+        if self.budget_stop:
+            await self._end_run_on_budget(total_activations)
+            return
         if self.pending_admin_reactions:
             log(
                 "sched",

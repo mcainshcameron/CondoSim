@@ -17,6 +17,7 @@ from uuid import uuid4
 from . import dials, timeline
 from .events import bus
 from .models import Chat, Message, Motion, RunState
+from .motions import motion_is_decided, tally_motion
 
 
 # ---------------------------------------------------------------------------
@@ -65,17 +66,50 @@ def contains_forbidden(text: str) -> str | None:
     return m.group(0) if m else None
 
 
+# The nouns that make a complaint a *phone*-fiction complaint. Anything not
+# on this list is a piece of the building, and the building is allowed to be
+# broken — see the patterns below.
+#
+# `telefono` deliberately does NOT allow a suffix: `telefon\w*` also matches
+# "ho telefonato al tecnico", which is exactly the sentence a resident writes
+# about a world event.
+_PHONE_SUBJECT = (
+    r"\b(?:telefono|telefonino|cellulare|smartphone|chat|cronologia|messaggi|app|whatsapp)\b"
+)
+
 # Phrases the model keeps reaching for even though they violate world rules:
 # - Phone-fiction excuses for blocked sends (platform always works)
 # - Meeting proposals (agents cannot meet in person, only chat)
 # If any of these appear in outgoing text, the send is refused and the
 # activation ends — the model must rewrite without them, or not send.
-_BLOCKED_PHRASES_PHONE = [
+#
+# The phone list is MIXED: plain lowercase substrings where the wording is
+# unambiguous on its own, compiled patterns where it is not. "fa le bizze",
+# "problemi tecnici" and "problemi al telefono" used to sit here as bare
+# substrings, and they were subject-free — they matched the sentence whatever
+# was misbehaving. That put them head-on against the ambient layer, which
+# hands every resident a shared building fact to talk about: `citofono_rotto`
+# ("Il citofono fa i capricci"), `ascensore_fermo`, `corrente_saltata`,
+# `riscaldamento_tarda`. "il citofono fa le bizze, qualcuno ha chiamato il
+# tecnico?" was refused and the whole activation discarded — a resident
+# silenced for discussing the one thing the day gave them, and told an
+# in-fiction nonsense reason for it. So they are anchored on a phone/chat
+# noun now, with the gap between noun and complaint limited to word
+# characters so a match cannot jump a clause boundary.
+_BLOCKED_PHRASES_PHONE: list[str | re.Pattern[str]] = [
     "non vedo la chat", "non vedo più la chat",
     "chat sparita", "chat è sparita", "chat è spari",
     "ho perso i messaggi", "ho perso la cronologia",
-    "fa le bizze", "fanno le bizze",
-    "problemi tecnici", "problemi al telefono",
+    # "il telefono fa le bizze" — but not "l'ascensore fa le bizze".
+    re.compile(_PHONE_SUBJECT + r"[\s\w']{0,15}\bfa(?:nno)? le bizze", re.IGNORECASE),
+    re.compile(r"\bfa(?:nno)? le bizze\b[\s\w']{0,15}" + _PHONE_SUBJECT, re.IGNORECASE),
+    # "problemi al telefono", "problemi tecnici con la chat" — but not
+    # "problemi tecnici con l'ascensore". The reverse direction ("il telefono
+    # mi sta dando problemi") refuses to cross a negation, because otherwise
+    # it eats "in chat non ci sono problemi" — a resident saying the chat is
+    # FINE, which is the opposite of the lie being blocked.
+    re.compile(r"\bproblemi\b[\s\w']{0,16}" + _PHONE_SUBJECT, re.IGNORECASE),
+    re.compile(_PHONE_SUBJECT + r"(?:(?!\bnon\b|\bnessun)[\s\w']){0,16}\bproblemi\b", re.IGNORECASE),
     "cronologia persa", "si è piallata",
 ]
 _BLOCKED_PHRASES_MEETING = [
@@ -91,16 +125,56 @@ _BLOCKED_PHRASES_MEETING = [
 ]
 
 
+def _first_blocked(low: str, entries: list[str | re.Pattern[str]]) -> str | None:
+    """First offending fragment of `low`, or None.
+
+    Returns the text that actually matched, never the pattern that matched
+    it: the refusal quotes this back to the resident verbatim, and quoting a
+    regex at somebody who thinks they own a flat in Milano is exactly the
+    runtime vocabulary this module exists to keep out of the fiction.
+    """
+    for entry in entries:
+        if isinstance(entry, str):
+            if entry in low:
+                return entry
+        else:
+            m = entry.search(low)
+            if m is not None:
+                return m.group(0)
+    return None
+
+
 def _content_rule_violation(text: str) -> tuple[str, str] | None:
     """Return (category, matched phrase) if text violates a world rule."""
     low = (text or "").lower()
-    for p in _BLOCKED_PHRASES_PHONE:
-        if p in low:
-            return ("phone_fiction", p)
-    for p in _BLOCKED_PHRASES_MEETING:
-        if p in low:
-            return ("meeting", p)
+    hit = _first_blocked(low, _BLOCKED_PHRASES_PHONE)
+    if hit is not None:
+        return ("phone_fiction", hit)
+    hit = _first_blocked(low, _BLOCKED_PHRASES_MEETING)
+    if hit is not None:
+        return ("meeting", hit)
     return None
+
+
+def _refusal_text(category: str, phrase: str, verb: str) -> str:
+    """The in-fiction refusal for a content-rule violation.
+
+    `verb` completes "Non {verb}: ..." — "mandare questo messaggio",
+    "depositare questa mozione". This block used to be written out at all
+    four call sites; two of the copies had drifted apart and three had their
+    accented Italian double-encoded through latin-1, so the resident was
+    shown mangled bytes in the one string whose whole job is to tell them
+    what to write instead. One copy is one place to keep the accents right.
+    """
+    if category == "phone_fiction":
+        return (
+            f"Non {verb}: contiene \"{phrase}\", che è una bugia "
+            f"(le chat funzionano sempre). Metti giù il telefono."
+        )
+    return (
+        f"Non {verb}: contiene \"{phrase}\". Tu non incontri i vicini "
+        f"di persona — solo chat. Metti giù il telefono."
+    )
 
 
 def _normalize_for_repeat(text: str) -> str:
@@ -356,6 +430,29 @@ class ToolContext:
     chats_read_this_activation: set = field(default_factory=set)
     inbox_read_count: int = 0
 
+    def landed_output_count(self) -> int:
+        """THE definition of "this agent put something into the world".
+
+        There used to be three of these and they disagreed: the activation
+        loop counted sends + reactions, the scheduler counted sends only and
+        author-blind. A forced agent who answered the admin with a 👍 then
+        satisfied implicit-done (turn cut, two of three tool steps unused)
+        but not the scheduler's ack (re-forced every remaining round plus
+        both bonus rounds — about six wasted activations). Route every
+        "did anything land?" question through here.
+
+        Under `forced_for_admin` only words count. That is the deliberate
+        rule, not an oversight: `tool_react_to_message` refuses a reaction
+        to the admin's own message under force, and the prompt tells the
+        resident "una reazione emoji non basta ... deve vedere parole tue".
+        Outside a forced turn a reaction is real output and ends the turn.
+        """
+        authored = sum(1 for m in self.sent_messages_this_activation
+                       if m.sender_id == self.agent_id)
+        if self.forced_for_admin:
+            return authored
+        return authored + len(self.reactions_added_this_activation)
+
 
 def _display_for(state: RunState, entity_id: str) -> str:
     if entity_id == "admin":
@@ -377,28 +474,51 @@ def _chat_by_id(state: RunState, chat_id: str) -> Chat | None:
 
 
 def _resolve_chat(state: RunState, ref: str, current_agent_id: str | None = None) -> Chat | None:
-    """Accept either internal id or display name (case-insensitive)."""
+    """Accept either internal id or display name (case-insensitive).
+
+    Display names are NOT unique. Every DM is created as
+    `f"DM con {other_name}"`, so a run in which three residents have written
+    to the administrator holds three chats called "DM con Amministratore".
+    `current_agent_id` was declared here and never read, so resolution
+    returned whichever of them was appended first, `_is_member` then refused
+    the send, and the resident was told a chat sitting on their own phone
+    doesn't exist — burning one of three `MAX_TOOL_CALLS_PER_ACTIVATION`
+    steps, each of which re-sends the whole ~10.4k-char system prompt. 9 of
+    24 saved runs carry at least one duplicated DM name, and the model only
+    ever sees display names: `send_message`'s own schema invites it to
+    address "una chat privata già aperta" by name, straight down this path.
+
+    So each stage collects every match and prefers one the asking agent is
+    actually in. Stage order is unchanged — id, then exact display name,
+    then case-insensitive, then the main-chat aliases — because this is a
+    tie-break inside a stage, not a re-ranking across them. With no
+    `current_agent_id` (or no match they belong to) the old first-wins
+    behaviour stands.
+    """
     if not ref:
         return None
     ref = ref.strip()
-    # Exact id match
-    for c in state.chats:
-        if c.id == ref:
-            return c
-    # Exact display-name match
-    for c in state.chats:
-        if c.display_name == ref:
-            return c
-    # Case-insensitive display name
     low = ref.lower()
-    for c in state.chats:
-        if c.display_name.lower() == low:
-            return c
+
+    def _pick(matches: list[Chat]) -> Chat | None:
+        if current_agent_id is not None:
+            for c in matches:
+                if current_agent_id in c.member_ids:
+                    return c
+        return matches[0] if matches else None
+
+    hit = _pick([c for c in state.chats if c.id == ref])
+    if hit is not None:
+        return hit
+    hit = _pick([c for c in state.chats if c.display_name == ref])
+    if hit is not None:
+        return hit
+    hit = _pick([c for c in state.chats if c.display_name.lower() == low])
+    if hit is not None:
+        return hit
     # "gruppo" / "condominio" as aliases for main
     if low in {"gruppo", "condominio", "main", "chat del condominio"}:
-        for c in state.chats:
-            if c.kind == "main":
-                return c
+        return _pick([c for c in state.chats if c.kind == "main"])
     return None
 
 
@@ -607,15 +727,7 @@ def tool_send_message(ctx: ToolContext, chat_id: str, text: str) -> str:
     if rule is not None:
         category, phrase = rule
         ctx.done = True
-        if category == "phone_fiction":
-            return (
-                f"Non mandare questo messaggio: contiene \"{phrase}\", che è una bugia "
-                f"(le chat funzionano sempre). Metti giù il telefono."
-            )
-        return (
-            f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
-            f"di persona — solo chat. Metti giù il telefono."
-        )
+        return _refusal_text(category, phrase, "mandare questo messaggio")
     if _is_self_repeat(ctx, chat.id, text):
         # Deliberately does NOT set ctx.done: unlike a content-rule violation
         # there's no filter to game here, and the useful outcome is that the
@@ -685,15 +797,7 @@ def tool_send_dm(ctx: ToolContext, recipient_id: str, text: str) -> str:
     if rule is not None:
         category, phrase = rule
         ctx.done = True
-        if category == "phone_fiction":
-            return (
-                f"Non mandare questo messaggio: contiene \"{phrase}\", che è una bugia "
-                f"(le chat funzionano sempre). Metti giù il telefono."
-            )
-        return (
-            f"Non mandare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
-            f"di persona — solo chat. Metti giù il telefono."
-        )
+        return _refusal_text(category, phrase, "mandare questo messaggio")
     if _is_self_repeat(ctx, dm_chat.id, text):
         return (
             f"Questo l'hai già scritto oggi a {_display_for(state, recipient_id)}, "
@@ -755,15 +859,7 @@ def tool_propose_motion(ctx: ToolContext, title: str, description: str) -> str:
     if rule is not None:
         category, phrase = rule
         ctx.done = True
-        if category == "phone_fiction":
-            return (
-                f"Non depositare questa mozione: contiene \"{phrase}\", che Ã¨ una bugia "
-                f"(le chat funzionano sempre). Metti giÃ¹ il telefono."
-            )
-        return (
-            f"Non depositare questa mozione: contiene \"{phrase}\". Il condominio esiste "
-            f"solo in chat. Metti giÃ¹ il telefono."
-        )
+        return _refusal_text(category, phrase, "depositare questa mozione")
     agent = next(a for a in state.agents if a.persona.id == ctx.agent_id)
     motion = Motion(
         id=f"m_{uuid4().hex[:8]}",
@@ -790,39 +886,30 @@ def tool_propose_motion(ctx: ToolContext, title: str, description: str) -> str:
 
 
 def _close_motion_if_ready(ctx: ToolContext, motion: Motion) -> None:
-    """Auto-close a motion once a clear majority of residents has been reached.
+    """Auto-close a motion once the outstanding votes can no longer change it.
 
-    Strict majority of all residents passes/fails. If everyone has cast a vote
-    but neither side has a strict majority (e.g., 2-2-1), the larger camp wins
-    and ties resolve as failed. The closure is announced in the main chat as
-    an admin-authored bookkeeping line so agents see it and can react.
+    Timing comes from `motions.motion_is_decided`, the verdict from
+    `motions.tally_motion` — the same quorum + millesimi count the admin's
+    "Chiudi votazione" button applies. This path used to count raw heads
+    instead, so a motion carried by two owners with 470/1000 millesimi closed
+    here as *approvata* and would have closed in `api_close_motion` as
+    *respinta*; since that endpoint short-circuits on an already-closed
+    motion, the weaker rule always won. The closure is announced in the main
+    chat as a bookkeeping line so agents see it and can react.
     """
     if motion.status != "open":
         return
     state = ctx.state
-    total = len(state.agents)
-    if total == 0:
-        return
-    yes_count = sum(1 for v in motion.votes.values() if v == "yes")
-    no_count = sum(1 for v in motion.votes.values() if v == "no")
-    abst_count = sum(1 for v in motion.votes.values() if v == "abstain")
-    cast = len(motion.votes)
-    threshold = total // 2 + 1
-
-    outcome: str | None = None
-    if yes_count >= threshold:
-        outcome = "passed"
-    elif no_count >= threshold:
-        outcome = "failed"
-    elif cast >= total:
-        outcome = "passed" if yes_count > no_count else "failed"
-
-    if outcome is None:
+    if not motion_is_decided(state, motion):
         return
 
-    motion.status = outcome  # type: ignore[assignment]
+    tally = tally_motion(state, motion)
+    motion.status = tally.outcome  # type: ignore[assignment]
     motion.closed_at_fictional_min = ctx.current_fictional_minutes
-    motion.outcome_note = f"{yes_count} sì, {no_count} no, {abst_count} astenuti"
+    motion.outcome_note = (
+        f"{tally.headcount_yes} sì, {tally.headcount_no} no, "
+        f"{tally.abstain_count} astenuti"
+    )
 
     # Trust signal — same as the manual-close path in main.py:api_close_motion.
     # Without this, motions that auto-close don't produce alignment/opposition
@@ -831,26 +918,75 @@ def _close_motion_if_ready(ctx: ToolContext, motion: Motion) -> None:
 
     main_chat = _chat_by_id(state, "main")
     if main_chat is not None:
-        verdict = "approvata" if outcome == "passed" else "respinta"
+        verdict = "approvata" if tally.passed else "respinta"
         body = (
             f"📋 [Esito mozione] \"{motion.title}\" — {verdict}. "
             f"({motion.outcome_note})"
         )
-        _create_and_append_message(ctx, main_chat, "admin", body)
+        _create_and_append_message(ctx, main_chat, "admin", body, bookkeeping=True)
 
     bus().publish(state.run_id, "motion_closed", {"motion": motion.model_dump()})
+
+
+def _motion_listing(motions: list[Motion]) -> str:
+    return "; ".join(f"\"{m.title}\" (codice {m.id})" for m in motions)
+
+
+def _resolve_motion_for_vote(
+    state: RunState, motion_id: str
+) -> tuple[Motion | None, str | None]:
+    """Find the motion a `vote` call means. Returns (motion, refusal).
+
+    The old resolver took the first insertion-order title match over *all*
+    motions regardless of status. In run_0c355245 the string "amministratore"
+    matched both open motions and the vote landed on "Mozione di sfiducia"
+    instead of "Nomina nuovo amministratore" — the politically opposite act —
+    and the tool then reported success while naming the wrong motion back to
+    the agent. Roughly one saved run in twenty has two motions open at once,
+    so this is not a corner case.
+
+    Order therefore matters. Exact code first. Then title matching, scoped to
+    the motions that are still open and searched newest-first — the vote is
+    about something the agent has just been reading, never about a motion that
+    is already over. If more than one open motion matches, it refuses and
+    names both codes rather than guessing: a resident who meant "nomina" and
+    is recorded voting on "sfiducia" costs more than a wasted tool call.
+    Closed motions are consulted last and only so the caller can answer "già
+    chiusa" instead of the untrue "non la trovo".
+    """
+    exact = next((m for m in state.motions if m.id == motion_id), None)
+    if exact is not None:
+        return exact, None
+
+    low = (motion_id or "").lower().strip()
+    if not low:
+        return None, None
+
+    open_motions = [m for m in state.motions if m.status == "open"]
+    open_hits = [m for m in reversed(open_motions) if low in m.title.lower()]
+    if len(open_hits) == 1:
+        return open_hits[0], None
+    if len(open_hits) > 1:
+        return None, (
+            f"\"{motion_id}\" corrisponde a più di una mozione aperta: "
+            f"{_motion_listing(open_hits)}. Rivota indicando il codice esatto."
+        )
+
+    closed_hits = [m for m in reversed(state.motions) if m.status != "open" and low in m.title.lower()]
+    if closed_hits:
+        return closed_hits[0], None
+    return None, None
 
 
 def tool_vote(ctx: ToolContext, motion_id: str, choice: str) -> str:
     state = ctx.state
     # Accept either the codice or a substring of the title
-    motion = next((m for m in state.motions if m.id == motion_id), None)
+    motion, refusal = _resolve_motion_for_vote(state, motion_id)
+    if refusal is not None:
+        return refusal
     if motion is None:
-        low = (motion_id or "").lower().strip()
-        motion = next((m for m in state.motions if low and low in m.title.lower()), None)
-    if motion is None:
-        open_list = [f"\"{m.title}\" (codice {m.id})" for m in state.motions if m.status == "open"]
-        suffix = ("Mozioni aperte in questo momento: " + "; ".join(open_list)) if open_list else "Al momento nessuna mozione è aperta."
+        open_list = [m for m in state.motions if m.status == "open"]
+        suffix = ("Mozioni aperte in questo momento: " + _motion_listing(open_list)) if open_list else "Al momento nessuna mozione è aperta."
         return f"Non trovo una mozione corrispondente a \"{motion_id}\". {suffix}"
     if motion.status != "open":
         return f"La mozione \"{motion.title}\" è già chiusa."
@@ -990,15 +1126,7 @@ def tool_forward_message(ctx: ToolContext, source_chat: str, message_excerpt: st
     if rule is not None:
         category, phrase = rule
         ctx.done = True
-        if category == "phone_fiction":
-            return (
-                f"Non inoltrare questo messaggio: contiene \"{phrase}\", che Ã¨ una bugia "
-                f"(le chat funzionano sempre). Metti giÃ¹ il telefono."
-            )
-        return (
-            f"Non inoltrare questo messaggio: contiene \"{phrase}\". Tu non incontri i vicini "
-            f"di persona â€” solo chat. Metti giÃ¹ il telefono."
-        )
+        return _refusal_text(category, phrase, "inoltrare questo messaggio")
 
     # Build message with forward metadata
     ctx.current_fictional_minutes = timeline.allocate_minute(
@@ -1061,7 +1189,7 @@ def tool_react_to_message(ctx: ToolContext, chat: str, message_excerpt: str, emo
     # Add reaction, avoiding duplicate reactions from same agent
     bucket = msg.reactions.setdefault(emoji, [])
     if ctx.agent_id in bucket:
-        return f"Hai giÃ  reagito a quel messaggio con {emoji}."
+        return f"Hai già reagito a quel messaggio con {emoji}."
     bucket.append(ctx.agent_id)
     ctx.reactions_added_this_activation.append((msg.id, emoji))
     from .events import bus
@@ -1153,9 +1281,13 @@ def _shorten(text: str, limit: int) -> str:
 
 
 def _create_and_append_message(
-    ctx: ToolContext, chat: Chat, sender_id: str, text: str
+    ctx: ToolContext, chat: Chat, sender_id: str, text: str, *, bookkeeping: bool = False
 ) -> Message:
-    """Create message, advance fictional clock by a realistic typing delay, append."""
+    """Create message, advance fictional clock by a realistic typing delay, append.
+
+    `bookkeeping` marks a machine-authored record (a vote tally) rather than
+    somebody speaking — see `Message.bookkeeping`.
+    """
     state = ctx.state
     # Typing delay: 1–4 fictional minutes between messages from the same agent
     ctx.current_fictional_minutes += random.randint(1, 4)
@@ -1181,9 +1313,19 @@ def _create_and_append_message(
         day=state.clock.day,
         audience=audience,
         cascaded=False,
+        bookkeeping=bookkeeping,
     )
     state.messages.append(msg)
-    ctx.sent_messages_this_activation.append(msg)
+    # Only the activating agent's OWN output belongs in their sent-tracker.
+    # `_close_motion_if_ready` posts the tally through here as "admin", and
+    # unguarded that admin line was credited to whichever resident's vote
+    # tripped the close: it faked their acknowledgment (a forced agent was
+    # then silently dropped from pending_admin_reactions with no WARNING —
+    # the exact silent-ignore the acknowledgment guarantee exists to stop)
+    # and cut an ordinary voter's turn short so they could not comment on
+    # the outcome they had just triggered.
+    if sender_id == ctx.agent_id:
+        ctx.sent_messages_this_activation.append(msg)
     # Track that the sender counts this as sent today
     for a in state.agents:
         if a.persona.id == sender_id:

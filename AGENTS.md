@@ -60,6 +60,9 @@ Required env (see `.env.example` for the full list):
   `SESSION_COOKIE_SECURE=0` so cookies work over plain http.
 - `DISABLED=1` — optional kill switch. All `/api/*` except `/api/health`
   return 503.
+- `DEBUG_ENDPOINTS=1` — opens `/api/debug/logs` (404 otherwise). That route
+  returns the raw log ring buffer: live run ids and chat excerpts. Auth is
+  opt-in, so leave it unset in production.
 
 ## Deploying to Heroku + Supabase
 
@@ -67,14 +70,25 @@ Architecture is a single Heroku Eco dyno (flat €5/mo, no autoscale) running
 FastAPI which both exposes `/api/*` and serves the built Vite SPA at `/`.
 State lives in Supabase Postgres (free tier).
 
-- `Procfile` points at `uvicorn backend.main:app`.
+- `Procfile` points at `uvicorn backend.main:app`, with
+  `--proxy-headers --forwarded-allow-ips='*'` and `TRUST_PROXY_HEADERS=1`
+  on the same line. They only make sense together: without the uvicorn
+  flags every request arrives from the Heroku router's address and the
+  per-IP rate limits become one global bucket; with them, uvicorn trusts
+  X-Forwarded-For **entry 0**, which is whatever the caller wrote (Heroku
+  appends rather than replaces), so `main._client_key` keys on the LAST
+  entry instead — the one our own router added. `TRUST_PROXY_HEADERS` is
+  what tells it a proxy we control is actually in front; unset, the header
+  is ignored entirely, which is the fail-safe direction.
 - `runtime.txt` pins Python 3.12.
 - Root `package.json` is glue for the Node buildpack — `npm run build`
   installs + builds `frontend/` into `frontend/dist/`, which FastAPI then
   mounts as static (`backend/main.py` static mount, last route).
 - Set buildpacks in order: `heroku/nodejs` then `heroku/python`.
 - Config vars on Heroku: `DATABASE_URL`, `OPENROUTER_API_KEY`,
-  `ADMIN_PASSWORD`, `SESSION_SECRET`. Leave `DISABLED` unset normally.
+  `ADMIN_PASSWORD`, `SESSION_SECRET`. Leave `DISABLED` and
+  `DEBUG_ENDPOINTS` unset normally; `TRUST_PROXY_HEADERS` is set by the
+  Procfile, not as a config var.
 - `db/migrations/*.sql` define the tables (`runs`, `agent_memory` in `001`;
   `llm_spend` in `002_llm_spend.sql`); they auto-apply on startup but you can also paste
   them into the Supabase SQL Editor for the initial create.
@@ -93,6 +107,13 @@ building, create the four files (`building.json`, `residents.json`,
 `souls/{agent_id}.md`, `memory_seeds/{agent_id}.md`) — no code changes
 required. The admin's first message IS the scenario: `build_run_state` demands
 an `opening_text` and refuses to pre-bake one.
+
+The prompt takes its scene from data too: the group's name comes off
+`state.chats`, and `BuildingConfig.city` (optional, defaults to `""`, so an
+older `building.json` still validates) supplies the town. Read it through
+`building.building_scene(building_id)` — a deliberately total wrapper that
+logs and returns `("", "")` rather than letting a malformed `building.json`
+kill an activation mid-run.
 
 ### SOUL vs. MEMORY
 
@@ -132,6 +153,12 @@ Rules: sort with `timeline.sort_key` / `timeline.in_order`, never by
 `fictional_timestamp_minutes` alone. The frontend's `compareMessages`
 mirrors it. `timeline.backfill_seq` repairs pre-`seq` runs on load.
 
+`Message` also carries `bookkeeping: bool = False` — additive, no
+migration (state is jsonb, and old saved runs deserialize with it False).
+It marks a machine-authored record that lands in the admin column without
+the administrator having spoken; see the scheduler section below for what
+reads it.
+
 ### LLM gateway (`backend/llm.py`)
 
 **Every** paid call goes through `llm.complete()`. It enforces the per-run
@@ -161,17 +188,28 @@ every chat the agent is in straight into the prompt →
   trip re-sends the whole system prompt. Inlining ~14 recent group messages
   is far cheaper than that duplicate.
 - *Implicit done.* v1 burned a second full call purely so the model could
-  say `done`. The loop now exits as soon as output has **landed**
-  (`sent_messages_this_activation` + `reactions_added_this_activation`
-  grew). The check is on what landed, not what was attempted — a send
-  refused by containment or the DM cooldown produces nothing, so the loop
-  continues and the agent can rewrite. That preserves the acknowledgment
-  guarantee.
+  say `done`. The loop now exits as soon as output has **landed**, where
+  "landed" is the single predicate `ToolContext.landed_output_count()` —
+  the same one the scheduler's ack detector uses. The check is on what
+  landed, not what was attempted — a send refused by containment or the DM
+  cooldown produces nothing, so the loop continues and the agent can
+  rewrite. That preserves the acknowledgment guarantee. There used to be
+  three hand-rolled versions of this expression and they disagreed; do not
+  add a fourth.
 
 Prompt size is bounded, not growing: `MAIN_CHAT_CONTEXT` (14) /
 `DM_CONTEXT` (6) cap inlined history, and `memory.window_memory` keeps the
 biographical seed plus `MEMORY_DAYS_IN_PROMPT` (6) recent diary entries.
-Measured flat at ~10.4k prompt chars on both day 10 and day 20.
+Measured flat by `scripts/simulate_offline.py`: ~11.7k avg / 12.7k max
+prompt chars at day 10, ~12.0k / 12.7k at day 20. The number to defend is
+the *flatness*, not the absolute — a day-20 max that tracks the day-10 max
+means nothing accumulates. That holds for caller-controlled text too now:
+every admin field is `Field(max_length=...)` on the request model (goal 2000,
+announce/DM 4000, opening 8000, motion title 200), so oversize is a 422 at the
+door, and both prompt sinks plus `build_context_digest` clamp defensively. An
+unbounded `admin_goal` was a ~100x spend multiplier — it is re-inlined into
+BOTH the system and the notification prompt on every activation for the rest
+of the run, and the only symptom was `cost_cap_exceeded`.
 
 ### Ambient texture (`backend/atmosphere.py`)
 
@@ -206,8 +244,12 @@ Mid-day admin actions (announce/DM/motion) call
 round-robin model this just records the audience as owed-a-reaction. Those
 agents bypass the participation roll on their next turn. If all planned
 rounds finish and reactions remain owed, up to two **bonus drain rounds**
-service them before day_end. Pending admin DMs (recipient hasn't replied
-yet) bypass the roll automatically too.
+service them at the end of the day. A drain target aims at `day_end - 60`
+but is floored on the transcript head, so it can land a few minutes *past*
+`day_end` when the head is already there — causality outranks the cap, and
+the alternative was activating an agent behind messages they were woken to
+answer. Pending admin DMs (recipient hasn't replied yet) bypass the roll
+automatically too.
 
 **Acknowledgment guarantee** — admin messages must not be silently
 ignored:
@@ -217,17 +259,44 @@ ignored:
    they activate after they can actually see what they're owed to react
    to. (`read_inbox` / `_thread_status` filter by
    `fictional_timestamp_minutes <= now`.)
-2. *Ack detector.* `ToolContext.reactions_added_this_activation` plus
-   `sent_messages_this_activation` together define an acknowledgment.
-   A forced agent that closes the phone with neither stays in
-   `pending_admin_reactions` and is retried in the bonus drain (max 2
-   rounds; on exhaustion a `WARNING` is logged and the set is cleared
-   so the day can end).
+2. *Ack detector.* One predicate decides it —
+   `ToolContext.landed_output_count()`. On an ordinary turn a message the
+   agent **authored** or an emoji reaction both count as output. Under
+   `forced_for_admin` **only an authored message discharges the
+   obligation**; a reaction alone does not, and neither does a machine
+   line the agent's tool call happened to trigger (a motion auto-close
+   posts its tally as `sender_kind="admin"`, which is why the count
+   filters on `sender_id == agent_id`). The rest of the stack agrees:
+   `react_to_message` refuses a reaction to the admin's own message under
+   force, and the prompt says *"Una reazione emoji non basta ... deve
+   vedere parole tue"*. A forced agent that closes the phone without
+   words stays in `pending_admin_reactions` and is retried in the bonus
+   drain (max 2 rounds; on exhaustion a `WARNING` is logged and the set is
+   cleared so the day can end).
+   `cascaded` is flipped on **discharge**, not at schedule time. Anything
+   still owed when the drain gives up is un-cascaded by
+   `_revive_undischarged_obligations` so tomorrow's seed picks it up again
+   — bounded by `_MAX_RETRY_DAY_AGE` (1 day) so a model that never calls a
+   tool can't force-activate the building every morning until the spend cap
+   trips, and skipping `bookkeeping` lines, which owe nobody a reply.
 3. *Prompt nudge.* `build_notification_prompt` takes a
    `forced_for_admin` flag from the scheduler and adds a one-line cue
    ("L'amministratore ha scritto e tu non hai ancora reagito... non
    chiudere il telefono senza dire niente") so the model isn't left
    guessing what the activation is for.
+
+**`Message.bookkeeping` — admin column, but nobody is speaking.** A vote
+tally (`tools._close_motion_if_ready`, `main.api_close_motion`) is stamped
+`sender_kind="admin"` so the UI puts it in the right column, and every
+consumer downstream then read it as the administrator talking: it was
+quoted back to residents as *"Cosa ha detto, parole sue"*, it dragged the
+forced-agent causality clamp forward, and the day-start seed force-activated
+all five residents the next morning to answer a scoreboard — `prob = 1.0`,
+bypassing the participation roll, the quiet-morning gate, the saturation
+damper and the soft budget. Set `bookkeeping=True` on any machine-authored
+record and skip such messages in anything that means "unanswered admin
+input". Do **not** express this as a new `SenderKind` — the frontend
+branches on `sender_kind` in nine places.
 
 Why serial: parallel activation against the same snapshot was the cause
 of the v1 near-duplicate problem — agents B, C, D would each independently
@@ -268,14 +337,35 @@ follow-up DM to the same chat only once the partner replies OR the cooldown
 elapses. Replaces the old `PER_DM_DAILY_HARD_CAP`, which stifled realistic
 follow-ups (especially to a silent admin).
 
+### Motion tallies (`backend/motions.py`)
+
+One rule, two callers. `tally_motion(state, motion)` applies quorum
+(`QUORUM_MIN_ATTENDING`) plus the 500/1000 `MILLESIMI_MAJORITY` and a yes-head
+majority; `motion_is_decided(state, motion)` decides only *when* a motion can
+close — everyone has voted, or no combination of the outstanding votes can
+still change the outcome.
+
+The module exists because the resident `vote` tool's auto-close
+(`tools._close_motion_if_ready`) and the admin close endpoint
+(`main.api_close_motion`) each counted the votes themselves and disagreed: the
+tool path used a bare head-count `total // 2 + 1` with no millesimi and no
+quorum. The weaker rule always won, because the API path short-circuits on an
+already-closed motion — the admin could never overrule a tally the tool had
+already written. Each caller still owns its own wording and side effects
+(`tools` posts the `bookkeeping=True` "📋 [Esito mozione]" line, `main` writes
+the millesimi-bearing `outcome_note` and applies trust); only the arithmetic
+is shared.
+
 ### Trust matrix (`backend/dials.py`)
 
 Organic signals only, resident-to-resident. Motion votes (±0.10/−0.05 on
 close), emoji reactions (±0.02/−0.04), message forwards (+0.01), DM replies
 to partner's last (+0.02), attack-by-name in public chat (−0.05). Each update
-publishes `trust_updated` SSE. The scalar feeds scheduler dampers + UI, but
-is **not** fed back into the agent prompt (by design — relationships live in
-MEMORY, not injected narration).
+publishes `trust_updated` SSE. The scalar feeds the **UI only** — the
+scheduler's damper stack contains no trust term (`grep -n trust
+backend/scheduler.py` returns nothing), and it is **not** fed back into the
+agent prompt either (by design — relationships live in MEMORY, not injected
+narration). Treat it as an observation surface, not a control input.
 
 ### Persistence & SSE
 
@@ -297,8 +387,22 @@ MEMORY, not injected narration).
   `typing`, `messages`, `day_start`, `day_end`, `day_done`, `run_ended`,
   `motion_filed`, `vote_cast`, `motion_closed`, `trust_updated`,
   `memory_consolidation_start/done`.
-- **Day-end race fix** is invariant: save run BEFORE publishing `day_end`
-  so SSE observers see a consistent DB state.
+- **Save before you publish** is invariant, everywhere: `save_run` completes
+  BEFORE the matching SSE goes out, so an observer that reacts to the event
+  by refetching cannot read a state older than the event describes. Holds at
+  `day_end` and, since the admin endpoints were fixed, at announce / DM /
+  motion / goal / close too — those five published first and saved after, so
+  a refetch raced the write and a crash in between streamed a message that
+  was never persisted. `trust_updated` counts too — `apply_trust_from_votes`
+  used to publish from inside itself, so `api_close_motion` passes
+  `publish=False` and calls `dials.publish_deltas` after the save.
+- **A `DayLoop` captured before an `await` is not a `DayLoop` after it.**
+  `DayLoop.run` pops itself out of `_ACTIVE_LOOPS` without holding
+  `state_lock`, so the admin endpoints re-read `active_loop(run_id)` *after*
+  `save_run` and before `schedule_reactions`. Calling it on a dead loop
+  records the obligation nowhere while still stamping `cascaded=True`, which
+  the loop's post-consolidation save then persists — an admin message
+  discharged forever without anyone having seen it.
 - **Day advance runs as a background task.** `POST /api/runs/{id}/advance_day`
   spawns an `asyncio.create_task` and returns **202** immediately so the
   request stays under Heroku's 30s H12 timeout. Sequence inside the task:
@@ -345,7 +449,10 @@ MEMORY, not injected narration).
 - All agent-facing text is in **Italian**. Tool error strings are in-fiction
   Italian (no English runtime vocabulary).
 - New message creation sites MUST use `timeline.allocate_minute` +
-  `timeline.next_seq`. Sorting MUST use `timeline.sort_key`.
+  `timeline.next_seq`. Sorting MUST use `timeline.sort_key`. That includes
+  tests — plant transcript content with `tests.helpers.append_message`
+  rather than hand-rolling a `Message`, or the test becomes the thing that
+  breaks the total order it asserts on.
 - New LLM calls MUST go through `llm.complete()`, never
   `openrouter.chat_completion` — otherwise they escape the spend caps.
 - Add a test to `tests/` for anything load-bearing. The suite is offline and
@@ -355,10 +462,29 @@ MEMORY, not injected narration).
   `backend/scenarios/` directory.
 - Fictional time only — never mix in `datetime.now()` for in-sim scheduling.
 - New containment terms go in `FORBIDDEN_TERMS` / `_content_rule_violation`
-  in `tools.py`, not scattered through call sites.
+  in `tools.py`, not scattered through call sites. A blocked phrase that is
+  subject-free ("problemi tecnici") must be a compiled pattern anchored on
+  `_PHONE_SUBJECT`, not a bare substring — the bare version refused
+  residents discussing the building's actual problems. Refusals are worded
+  once, by `_refusal_text(category, phrase, verb)`; there are four call
+  sites and there must not be a fifth copy of the string.
+- One predicate per question. `ToolContext.landed_output_count()` is the
+  only definition of "this agent produced output"; `motions.tally_motion`
+  is the only vote count; `agent._clamp` is the only prompt truncation.
+  Each of these was three copies that disagreed.
 - Per-agent model overrides go in `residents.json` (`model` field); defaults
   live in `backend/config.py` (`DEFAULT_AGENT_MODEL`,
   `AGENT_FALLBACK_MODELS`).
+- Every new mutating endpoint needs its own `@limiter.limit(...)` and a
+  `request: Request` parameter. There is no `default_limits` and there must
+  not be one — slowapi only reads them from `SlowAPIASGIMiddleware`, which
+  we cannot install (its `send_wrapper` re-emits `http.response.start` per
+  body chunk and breaks the SSE stream), so an undecorated route is simply
+  unlimited. `tests/test_api_hardening.py` asserts the decorator exists per
+  endpoint.
+- Every admin-supplied text field needs a `Field(max_length=...)`. It is
+  re-inlined into agent prompts, so an unbounded field is a spend
+  multiplier, not a cosmetic problem.
 
 ## Known gaps worth knowing before changing things
 
@@ -372,8 +498,13 @@ See docs/IMPLEMENTATION.md §6 for the full list. Highlights:
   examples in `build_system_prompt` are load-bearing; the procedural block
   in `build_notification_prompt` is the safe place to edit.
 - UI MEMORY viewer doesn't auto-refresh on `memory_consolidation_done`.
-- Only one building authored (`001`, Condominio Via Garibaldi); the UI
-  hardcodes it as default payload.
+- Only one building authored (`001`, Condominio Via Garibaldi). The system
+  prompt is building-agnostic now, but three places still name it literally:
+  the `send_message` schema description in `tools.py`, `scripts/dev_server.py`'s
+  scripted responder, and the frontend (landing, topbar, login, default
+  payload). Authoring `002` would produce an agent told the group is
+  "Palazzo X" while the tool schema still offers "Condominio Via Garibaldi"
+  as the example.
 - Motions still have no `kind`, so there's no admin-revocation end
   condition — runs end on spend caps only. `docs/IMPLEMENTATION.md` and
   `Possible_plan.md` describe further phases (structured outputs, memory

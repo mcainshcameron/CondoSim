@@ -137,7 +137,7 @@ On a hit the agent activates and sees the FULL up-to-date state every prior agen
 **Acknowledgment guarantee** — admin messages are not silently ignored:
 
 1. *Causality clamp* — a forced agent's `target` fictional minute is pushed past the latest non-resident message in their audience so the message is visible via `read_inbox` (which filters by `fictional_timestamp_minutes <= now`).
-2. *Ack detector* — `ToolContext.reactions_added_this_activation` and `sent_messages_this_activation` together define an acknowledgment. A forced agent that closes the phone with neither stays in `pending_admin_reactions` and is retried in the bonus drain (max 2 rounds; on exhaustion a `WARNING` is logged and the set cleared so the day can end).
+2. *Ack detector* — `ToolContext.landed_output_count()` is the single definition of "this agent produced output". On an ordinary turn an authored message or an emoji reaction both count; under `forced_for_admin` **only an authored message discharges the obligation** — a 👍 does not, and neither does a machine line the agent's own tool call happened to trigger (a motion auto-close posts its tally as `sender_kind="admin"`, so the count filters on `sender_id == agent_id`). The rest of the stack already agreed: `react_to_message` refuses a reaction to the admin's own message under force, and the prompt says *"Una reazione emoji non basta"*; the implicit-done side was the outlier and was corrected to match. A forced agent that closes the phone without words stays in `pending_admin_reactions` and is retried in the bonus drain (max 2 rounds; on exhaustion a `WARNING` is logged and the set cleared so the day can end). `cascaded` flips on **discharge**, not at schedule time: anything still owed when the drain gives up is un-cascaded by `_revive_undischarged_obligations` so the next morning's seed picks it up again, bounded by `_MAX_RETRY_DAY_AGE` (1 day) and skipping `bookkeeping` lines, which owe nobody a reply.
 3. *Prompt nudge* — `build_notification_prompt` accepts a `forced_for_admin` flag and adds a one-line cue ("L'amministratore ha scritto e tu non hai ancora reagito... non chiudere il telefono senza dire niente").
 
 Why serial: parallel activation against the same snapshot was the cause of the v1 near-duplicate problem — agents B/C/D would each independently produce "ma cosa succede?" / "qualcuno spieghi" / "che cosa sta succedendo?". v1 caught these post-hoc with a regex; round-robin removes the cause (B sees what A just said before B acts).
@@ -317,11 +317,11 @@ Currently deferred. Admin-goal is the cleanest steering lever.
 
 **Fix direction**: aggregate `usage.prompt_tokens` / `completion_tokens` from openrouter responses into the RunState. Display total in the UI. Estimated 30 min.
 
-### 6.10 No tests
+### 6.10 ~~No tests~~ — ✅ SHIPPED
 
-**Status**: no pytest suite. Regression verification relies on `scripts/run_smoketest.py` (end-to-end live run) which is slow and costs API calls.
+**Resolved**: `pytest` runs the real scheduler, activation loop, tools and consolidation against a scripted LLM (`tests/fake_llm.py`) and an in-memory store — offline, under two seconds, zero spend. The 2026-08-01 review closed the last three blind spots it found: `dials.py` had no test at all (`tests/test_dials.py`), motions and votes had no tally coverage (`tests/test_motions.py`), and the bonus drain had none (`tests/test_scheduler_forcing.py`). `tests/helpers.py` plants transcript content through `timeline.allocate_minute` / `next_seq` so a test can never be the thing that breaks the total order it asserts on.
 
-**Fix direction**: unit tests for `_thread_status`, `_content_rule_violation`, `_participation_probability` modifiers, `build_run_state` validation, SOUL/MEMORY file readers, scheduler causality clamp + ack guarantee. Estimated 2-3h.
+**Still true**: the suite covers *mechanics*, not dialogue quality. Only `scripts/eval_voices.py` or a real smoketest tells you whether the residents sound like people.
 
 ---
 
@@ -333,9 +333,8 @@ In order of user impact / effort ratio:
 2. **Admin-bot for DM replies** (6.4) — 1h, removes the dead-end feel of admin DMs
 3. **Second building** (6.8) — content exercise, not code. 1h to author + 15 min for UI selector
 4. **Token/cost observability** (6.9) — 30 min, useful for long runs
-5. **Unit tests** (6.10) — 2h, pays back whenever we tune prompts again
 
-Recently shipped: multi-signal trust matrix (6.1).
+Recently shipped: multi-signal trust matrix (6.1), the offline pytest suite (6.10).
 
 Not recommended as urgent: motion-filing nudge (use admin_goal instead), prompt re-tuning without instrumentation, game_design.md rewrite (replaced by this doc).
 

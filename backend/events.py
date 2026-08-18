@@ -20,6 +20,22 @@ from typing import Any
 REPLAY_BUFFER_SIZE = 200
 REPLAY_TTL_SEC = 60.0
 
+# Hard cap on simultaneous SSE streams for one run. Each subscriber owns a
+# Queue(maxsize=500) and a `message_sent` event measures ~3.2 KB, so a backed-up
+# stream can pin ~1.6 MB — on a 512 MB Heroku Eco dyno that is not free. Normal
+# use is one browser tab per run; the headroom is for reconnect churn, where the
+# server can briefly hold both the abandoned stream and its replacement (the old
+# generator's `finally` only runs once Starlette notices the disconnect).
+MAX_SUBSCRIBERS_PER_RUN = 16
+
+
+class TooManySubscribers(RuntimeError):
+    """Raised by `subscribe` when a run is already at MAX_SUBSCRIBERS_PER_RUN.
+
+    Deliberately not an HTTPException — the bus knows nothing about HTTP.
+    `api_run_events` translates it into a 429.
+    """
+
 
 @dataclass
 class Event:
@@ -49,6 +65,10 @@ class RunEventBus:
         self._run_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     def subscribe(self, run_id: str) -> tuple[asyncio.Queue[Event], list[Event]]:
+        # `.get(run_id, ())` rather than `self._subscribers[run_id]`: reading
+        # the defaultdict would mint the entry before we know we're keeping it.
+        if len(self._subscribers.get(run_id, ())) >= MAX_SUBSCRIBERS_PER_RUN:
+            raise TooManySubscribers(run_id)
         q: asyncio.Queue[Event] = asyncio.Queue(maxsize=500)
         self._subscribers[run_id].add(q)
         cutoff = time() - REPLAY_TTL_SEC

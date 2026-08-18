@@ -136,3 +136,17 @@ SESSION_MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 days
 # SESSION_COOKIE_SECURE=0 in .env so the browser will accept the cookie.
 SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "1") not in ("0", "false", "False", "")
 DISABLED = os.getenv("DISABLED", "").strip() == "1"
+# `/api/debug/logs` dumps the raw log ring buffer, which carries live run ids
+# and excerpts of resident chat text. Auth is opt-in (it engages only when
+# ADMIN_PASSWORD *and* SESSION_SECRET are both set), so in open-beta mode that
+# endpoint would be world-readable. Default OFF, same idiom as DISABLED.
+DEBUG_ENDPOINTS = os.getenv("DEBUG_ENDPOINTS", "").strip() == "1"
+# Set ONLY when a reverse proxy we control terminates the connection — it is
+# paired with `--proxy-headers --forwarded-allow-ips='*'` in the Procfile and
+# both live on the same line there so they cannot drift apart. It tells the
+# rate limiter to read the client IP out of X-Forwarded-For instead of
+# `request.client.host`. Default OFF is the fail-safe direction: unset, every
+# caller behind a proxy shares one over-strict bucket; wrongly set on a
+# directly-exposed server, the limits become spoofable by anyone who sends
+# their own X-Forwarded-For.
+TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "").strip() == "1"

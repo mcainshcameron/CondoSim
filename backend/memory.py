@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import building, timeline
-from .config import AGENT_MAX_TOKENS, MEMORY_TEMPERATURE
+from .config import AGENT_MAX_TOKENS, MEMORY_DAYS_IN_PROMPT, MEMORY_TEMPERATURE
 from .db import has_database, pool
 from .events import bus
 from .llm import BudgetExceeded, OpenRouterError, complete
@@ -301,7 +301,15 @@ async def _consolidate_one(
         return
 
     soul = read_soul(state, aid)
-    memory_so_far = await read_memory(state, aid)
+    # Window it exactly like build_system_prompt does. This was the one prompt
+    # in the app exempt from windowing, which is backwards: the call that
+    # decides what a resident REMEMBERS was handed sixteen days of diary at
+    # once — precisely the state window_memory's own docstring warns about,
+    # the model drowning while the oldest entries crowd out what just
+    # happened — while the resident it writes for only ever sees the last
+    # MEMORY_DAYS_IN_PROMPT. The full diary stays in the database and in the
+    # MEMORY viewer; only the prompt is trimmed.
+    memory_so_far = window_memory(await read_memory(state, aid), MEMORY_DAYS_IN_PROMPT)
     transcript = _today_transcript(state, agent, day)
     prompt = _consolidation_prompt(state, agent, day, soul, memory_so_far, transcript)
 
@@ -340,7 +348,21 @@ async def _consolidate_one(
 
     weekday = _weekday_italian(state, day)
     addition = f"\n\n--- Giorno {day}, {weekday} ---\n{body.strip()}\n"
-    await _append_memory(state.run_id, aid, addition)
+    try:
+        await _append_memory(state.run_id, aid, addition)
+    except Exception as exc:
+        # The paid call has already happened by this point, so a dropped
+        # connection here throws away a diary day that cost real money — and
+        # it used to do so in total silence, because the exception surfaced in
+        # `gather(return_exceptions=True)` and that list was discarded.
+        # Leave `agent.notes` alone: the day was NOT absorbed, so tomorrow's
+        # consolidation should still see today's scratchpad.
+        log_error(
+            "memory",
+            f"{aid} day{day} append failed after consolidation, "
+            f"{len(body)}ch lost: {exc!r}",
+        )
+        return
     log("memory", f"{aid} day{day} consolidated ({len(body)}ch)")
 
     # Clear the intra-day scratchpad — today's thoughts have been absorbed.
@@ -351,8 +373,19 @@ async def consolidate_day(state: RunState, day: int) -> None:
     """End-of-day hook: each agent writes their diary entry in parallel."""
     log("memory", f"consolidating day {day} for {len(state.agents)} agents")
     bus().publish(state.run_id, "memory_consolidation_start", {"day": day})
-    await asyncio.gather(
+    results = await asyncio.gather(
         *(_consolidate_one(state, agent, day) for agent in state.agents),
         return_exceptions=True,
     )
+    # `return_exceptions=True` is right — one agent's DB blip must not cancel
+    # the other four mid-write — but the list it hands back was being dropped
+    # on the floor, so a crash inside _consolidate_one lost that resident's
+    # day with no log line anywhere in the process. The day still ends; it
+    # just stops ending invisibly.
+    for agent, result in zip(state.agents, results):
+        if isinstance(result, BaseException):
+            log_error(
+                "memory",
+                f"{agent.persona.id} day{day} consolidation crashed: {result!r}",
+            )
     bus().publish(state.run_id, "memory_consolidation_done", {"day": day})

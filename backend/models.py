@@ -113,6 +113,16 @@ class Message(BaseModel):
     # set this to False explicitly at construction; schedule_reactions flips
     # it to True after processing.
     cascaded: bool = True
+    # Machine-authored record-keeping — vote tallies and the like. These are
+    # stamped sender_kind="admin" because they belong to the admin column in
+    # the UI, but the administrator is NOT speaking: nobody is waiting for a
+    # reply to a scoreboard. Without this flag every consumer downstream read
+    # them as admin speech — the tally was quoted back to residents as "Cosa
+    # ha detto, parole sue", it force-activated the whole cast the next
+    # morning, and it counted as the voting resident's own output. Do not
+    # express this as a new `SenderKind`: the frontend branches on
+    # sender_kind in nine places.
+    bookkeeping: bool = False
 
 
 class Chat(BaseModel):

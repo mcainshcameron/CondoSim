@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import hashlib
 import random
+import re
+from functools import lru_cache
 
 from . import atmosphere, memory, timeline
 from .agent import activate_agent
@@ -60,6 +62,18 @@ TIME_OF_DAY_WINDOWS: dict[str, tuple[int, int]] = {
 # forever, but generous enough that announce + DM + motion in the same
 # minute all get serviced.
 _MAX_BONUS_ROUNDS = 2
+
+# How stale an unanswered admin message may be and still be handed back to
+# the next morning's seed (in fictional days, measured at the give-up branch).
+# `cascaded` is the only channel that survives a day boundary — DayLoop and
+# its `pending_admin_reactions` set are rebuilt from scratch each day and
+# nothing per-agent is persisted — so "retry tomorrow" means "un-cascade the
+# message", and an unbounded version would force-activate the whole audience
+# at prob=1.0 every morning until the spend cap tripped. At 1 the message
+# gets the day it was posted plus at most two more mornings, then it is
+# dropped for good. Same spirit as _MAX_BONUS_ROUNDS: a bounded number of
+# chances, then let the day (and the run) move on.
+_MAX_RETRY_DAY_AGE = 1
 
 
 def day_start_minutes(day: int) -> int:
@@ -144,10 +158,65 @@ def _has_pending_admin_dm(state: RunState, agent_id: str, now: int) -> bool:
     return False
 
 
+def _latest_owed_minute(state: RunState, agent_id: str) -> int:
+    """Newest non-resident message this agent is in the audience of, or -1.
+
+    Half of the causality clamp: a forced agent must not be stamped before
+    the message they are being woken up to answer. Every context reader
+    filters `fictional_timestamp_minutes <= now` (read_inbox, _thread_status,
+    build_context_digest), so activating earlier means activating blind to
+    the exact thing the activation is for.
+
+    Shared by the planned rounds and the bonus drain — the drain used to
+    lack it, which is how two owed agents ended up answering the same admin
+    question from stale snapshots.
+
+    Bookkeeping lines (vote tallies) wear sender_kind="admin" but owe nobody
+    a reply, so they must not drag the activation minute forward as if they
+    were an unanswered admin question.
+    """
+    latest = -1
+    for m in state.messages:
+        if m.sender_kind == "resident" or agent_id not in m.audience:
+            continue
+        if m.bookkeeping:
+            continue
+        if m.fictional_timestamp_minutes > latest:
+            latest = m.fictional_timestamp_minutes
+    return latest
+
+
+@lru_cache(maxsize=128)
+def _mention_pattern(display_name: str) -> re.Pattern[str] | None:
+    """Word-bounded, CASE-SENSITIVE matcher for a resident's surname.
+
+    Case sensitivity is the load-bearing part. Lowercased, `Conti` is a
+    substring of `conti`, `continua`, `conteggio` — and Conti is not an
+    unlucky outlier: `Greco` and `Romano` are ordinary Italian words too.
+    Replayed over the saved runs, 65 of 245 mention hits were false, and a
+    false hit is not cheap: it pins the participation probability to 0.95
+    for a resident nobody actually named (3.9% of Conti's turn-slots went
+    to answering the word "accounts"). Italian prose doesn't capitalise
+    mid-sentence, so demanding the capital plus `\\b` boundaries dropped all
+    65 false hits while keeping all 180 real ones.
+
+    Compiled once per display name: the caller scans every message in the
+    run, on every turn, for every agent.
+
+    Deliberately NOT applied to `_looks_like_admin_ping` — its token list
+    contains a bare "?" and other non-word tokens that `\\b` would break.
+    """
+    parts = display_name.split()
+    surname = parts[-1] if parts else ""
+    if len(surname) < 3:
+        return None
+    return re.compile(rf"\b{re.escape(surname)}\b")
+
+
 def _was_mentioned_recently(state: RunState, agent: Agent, since_min: int, now: int) -> bool:
     """Anyone @-mention or surname-call this agent in [since_min, now]?"""
-    needle = agent.persona.display_name.split()[-1].lower()
-    if len(needle) < 3:
+    pattern = _mention_pattern(agent.persona.display_name)
+    if pattern is None:
         return False
     chats_with_me = {c.id for c in state.chats if agent.persona.id in c.member_ids}
     for m in state.messages:
@@ -157,7 +226,7 @@ def _was_mentioned_recently(state: RunState, agent: Agent, since_min: int, now: 
             continue
         if m.fictional_timestamp_minutes < since_min or m.fictional_timestamp_minutes > now:
             continue
-        if needle in (m.content or "").lower():
+        if pattern.search(m.content or ""):
             return True
     return False
 
@@ -268,6 +337,37 @@ def _allocate_round_window(day: int, round_idx: int, total_rounds: int) -> tuple
     return win_start, win_end
 
 
+def _bonus_target_minute(latest_minute: int, day_end: int) -> int:
+    """Fictional minute for a bonus-drain activation.
+
+    Reads as "late in the day, but never behind the transcript". The order of
+    the three clamps is the whole point:
+
+      floor  `latest + 5`   — after everything already said
+      floor  `day_end - 60` — and inside the last hour, so a drain triggered
+                              by a mid-morning admin post doesn't stamp the
+                              retry at 09:00
+      cap    `day_end - 1`  — before closing time
+      floor  `latest`       — **last**, because causality outranks the cap
+
+    It used to end at the cap: `min(max(latest+5, day_end-60), day_end-1)`.
+    That moves the target *backwards* the moment the transcript head is
+    already inside the final six minutes of the day — which the planned
+    rounds reach routinely, since their own owed-message clamp stamps a
+    forced agent at `latest_owed + 2..25` with no upper bound. Measured
+    consequence: romano and conti both activated at 1379 against a head of
+    1382/1383. Every context reader filters
+    `fictional_timestamp_minutes <= now` (read_inbox, _thread_status,
+    build_context_digest), so both woke up blind and answered the same admin
+    question from stale snapshots — the parallel-snapshot failure the
+    round-robin scheduler exists to eliminate.
+
+    The planned path has always applied its floor last (see `_run_one_round`);
+    only the drain had it inverted.
+    """
+    return max(min(max(latest_minute + 5, day_end - 60), day_end - 1), latest_minute)
+
+
 def _seed_for(run_id: str, day: int, round_idx: int) -> int:
     raw = f"{run_id}:day:{day}:round:{round_idx}".encode("utf-8")
     return int(hashlib.sha256(raw).hexdigest()[:12], 16)
@@ -294,6 +394,48 @@ class DayLoop:
 
     def _resident_ids(self) -> set[str]:
         return {a.persona.id for a in self.state.agents}
+
+    def _revive_undischarged_obligations(self, day: int) -> list[str]:
+        """Hand still-unanswered admin messages back to tomorrow's seed.
+
+        `cascaded` is stamped True at SCHEDULE time (`schedule_reactions`,
+        and the day-start seed loop), i.e. before anybody has activated. So
+        an obligation the bonus drain could not discharge was discharged
+        anyway — permanently, because the only retry path (the next day's
+        seed) tests `not m.cascaded`. Reproduced with the real scheduler:
+        script one resident to narrate instead of calling a tool and after
+        day 1 the opening admin message is cascaded, pending is empty, day 2
+        seeds nothing, and that resident authors zero messages for the whole
+        run. Flipping the flag on DISCHARGE rather than on schedule is the
+        fix; un-cascading here is where the discharge actually fails.
+
+        Bounded by `_MAX_RETRY_DAY_AGE` — a model that never calls a tool
+        must not force-activate its neighbours at prob=1.0 every morning
+        until the spend cap trips.
+
+        Two deliberate limits, both consequences of `cascaded` living on the
+        message rather than per-agent:
+        - Reviving re-forces the message's whole audience next morning, not
+          just the agent who stayed silent. There is nowhere else to put the
+          state: `pending_admin_reactions` is rebuilt from scratch each day.
+          A redundant nudge to four residents is the cheaper error than an
+          admin question nobody ever answers.
+        - Bookkeeping lines are never revived. A scoreboard owes nobody a
+          reply, and reviving one would rebuild the next-morning mass
+          force-activation that `Message.bookkeeping` exists to stop.
+        """
+        owed = self.pending_admin_reactions
+        revived: list[str] = []
+        for m in self.state.messages:
+            if m.sender_kind == "resident" or not m.cascaded or m.bookkeeping:
+                continue
+            if day - m.day > _MAX_RETRY_DAY_AGE:
+                continue
+            if not owed.intersection(m.audience):
+                continue
+            m.cascaded = False
+            revived.append(m.id)
+        return revived
 
     def schedule_reactions(self, trigger: Message, depth: int = 0, force: bool = False) -> None:
         """Compatibility shim — main.py calls this after admin actions.
@@ -360,12 +502,7 @@ class DayLoop:
             # fictional time and not see it via read_inbox / _thread_status
             # (both filter by `fictional_timestamp_minutes <= now`).
             if owed:
-                latest_owed_min = -1
-                for m in self.state.messages:
-                    if m.sender_kind == "resident" or aid not in m.audience:
-                        continue
-                    if m.fictional_timestamp_minutes > latest_owed_min:
-                        latest_owed_min = m.fictional_timestamp_minutes
+                latest_owed_min = _latest_owed_minute(self.state, aid)
                 if latest_owed_min >= 0 and target <= latest_owed_min:
                     # Small "I picked up the phone shortly after" delay so the
                     # agent is reacting in the same minute, not racing the post.
@@ -414,7 +551,11 @@ class DayLoop:
                 self.budget_stop = ctx.budget_exceeded
                 log_error("sched", f"budget cap hit ({ctx.budget_exceeded}) — stopping day")
                 break
-            acknowledged = bool(ctx.sent_messages_this_activation)
+            # One predicate, shared with the activation loop's implicit-done
+            # exit: under force only a message this agent authored themself
+            # counts. Author-blind counting let an admin-authored vote tally
+            # that happened to be posted during their turn fake the ack.
+            acknowledged = ctx.landed_output_count() > 0
             if forced_reason is not None and not acknowledged:
                 # Forced agent closed the phone without sending.
                 # Keep them in pending so the bonus drain retries them — the
@@ -489,11 +630,21 @@ class DayLoop:
         # cascaded yet" behaviour — admin messages sent between days, during
         # consolidation, or before the first advance still get serviced.
         for m in self.state.messages:
-            if m.sender_kind != "resident" and not m.cascaded:
+            if m.sender_kind == "resident" or m.cascaded:
+                continue
+            # Bookkeeping lines (vote tallies from the UI's "Chiudi votazione"
+            # or from an auto-close) are stamped "admin" but nobody is owed a
+            # reply to a scoreboard. Seeding them set prob=1.0 for all five
+            # residents the next morning, bypassing the participation roll,
+            # the quiet-morning gate, the saturation damper and the soft
+            # budget — then told each of them "una reazione emoji non basta,
+            # deve vedere parole tue" about a tally. Still mark them cascaded
+            # so they aren't reconsidered every day.
+            if not m.bookkeeping:
                 for aid in m.audience:
                     if aid != m.sender_id and aid in self._resident_ids():
                         self.pending_admin_reactions.add(aid)
-                m.cascaded = True
+            m.cascaded = True
         if self.pending_admin_reactions:
             log("sched", f"seeded pending reactions: {sorted(self.pending_admin_reactions)}")
 
@@ -522,28 +673,46 @@ class DayLoop:
             log("sched", f"bonus drain round {bonus + 1}: owed={sorted(self.pending_admin_reactions)}")
             owed_now = list(self.pending_admin_reactions)
             day_end = day_end_minutes(day)
+            # Seeded like a planned round so the "picked up the phone shortly
+            # after" jitter stays deterministic per (run, day, pass) and
+            # wall-clock-free. Offset past ROUNDS_PER_DAY so a bonus pass can
+            # never draw the same stream as a planned round.
+            rng = random.Random(_seed_for(self.state.run_id, day, ROUNDS_PER_DAY + bonus))
             for aid in owed_now:
                 agent = next((a for a in self.state.agents if a.persona.id == aid), None)
                 if agent is None:
                     self.pending_admin_reactions.discard(aid)
                     continue
-                # Bonus retries are spread across the remaining day so multiple
-                # owed agents don't all stamp the same minute.
-                base = max(timeline.latest_minute(self.state) + 5, day_end - 60)
-                target = min(base, day_end - 1)
+                # Late in the day, but never behind the transcript — see
+                # `_bonus_target_minute` for why the order of the clamps is
+                # load-bearing.
+                target = _bonus_target_minute(timeline.latest_minute(self.state), day_end)
+                # Second half of the clamp, ported from the planned path: don't
+                # stamp before the message this agent is being woken up to
+                # answer. Causality outranks the day_end cap here — a target a
+                # few minutes past closing time is harmless; a blind activation
+                # is not.
+                latest_owed_min = _latest_owed_minute(self.state, aid)
+                if latest_owed_min >= 0 and target <= latest_owed_min:
+                    target = latest_owed_min + rng.randint(2, 25)
                 log("sched", f"  {aid} BONUS activate @min{target}")
                 try:
                     ctx = await activate_agent(
                         self.state, aid, target, forced_for_admin=True
                     )
                 except Exception as exc:
+                    # Keep them owed, mirroring _run_one_round. Discarding here
+                    # dropped the obligation on a transient error with no
+                    # WARNING anywhere — the silent-ignore the acknowledgment
+                    # guarantee exists to prevent. The retry is bounded twice
+                    # over: _MAX_BONUS_ROUNDS today, then the give-up branch
+                    # below decides whether tomorrow gets a turn.
                     log_error("sched", f"{aid} bonus activation failed: {exc!r}")
-                    self.pending_admin_reactions.discard(aid)
                     continue
                 if ctx.budget_exceeded:
                     self.budget_stop = ctx.budget_exceeded
                     break
-                acknowledged = bool(ctx.sent_messages_this_activation)
+                acknowledged = ctx.landed_output_count() > 0
                 if acknowledged:
                     self.pending_admin_reactions.discard(aid)
                 else:
@@ -564,11 +733,13 @@ class DayLoop:
             await self._end_run_on_budget(total_activations)
             return
         if self.pending_admin_reactions:
+            revived = self._revive_undischarged_obligations(day)
             log(
                 "sched",
                 f"WARNING: pending_admin_reactions still non-empty after "
                 f"{_MAX_BONUS_ROUNDS} bonus rounds: {sorted(self.pending_admin_reactions)}. "
-                f"Giving up so the day can end.",
+                f"Giving up so the day can end. "
+                f"Handed {len(revived)} message(s) back to tomorrow's seed: {revived}",
             )
             self.pending_admin_reactions.clear()
 

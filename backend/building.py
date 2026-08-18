@@ -20,6 +20,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from .config import DATA_DIR, DEFAULT_AGENT_MODEL
+from .logging_utils import log_error
 from .models import (
     Agent,
     Chat,
@@ -43,6 +44,10 @@ class BuildingConfig(BaseModel):
     id: str
     name: str
     fictional_start_iso: str
+    # Where the building stands. Optional and empty by default so buildings
+    # authored before this field existed still validate; the prompt simply
+    # drops the ", a {city}" clause when it is unset.
+    city: str = ""
 
 
 class ResidentTemplate(BaseModel):
@@ -97,6 +102,23 @@ def load_residents(building_id: str) -> list[Agent]:
         )
         for t in templates
     ]
+
+
+def building_scene(building_id: str) -> tuple[str, str]:
+    """`(name, city)` for the prompt's one-line "where you live" framing.
+
+    Deliberately total: prompt assembly happens mid-run, on every activation,
+    and a missing or malformed building.json there must not take an agent's
+    turn down — the run is already loaded and the cast is already talking.
+    Callers fall back to what is in `state.chats`, which is the authority on
+    what the group is actually called.
+    """
+    try:
+        cfg = load_building(building_id)
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        log_error("building", f"scene lookup failed for {building_id}: {exc!r}")
+        return "", ""
+    return cfg.name, (cfg.city or "").strip()
 
 
 def list_buildings() -> list[str]:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from . import atmosphere, memory, timeline
+from . import atmosphere, building, memory, timeline
 from .config import (
     AGENT_MAX_TOKENS,
     AGENT_TEMPERATURE,
@@ -23,6 +23,33 @@ from .tools import TOOL_SCHEMAS, ToolContext, dispatch_tool, contains_forbidden
 # Prompt construction
 # ---------------------------------------------------------------------------
 
+# Caller-controlled text is length-bounded before it reaches a prompt.
+#
+# The admin goal is the expensive one: it is inlined in BOTH the system
+# prompt and the notification prompt, which ship in the SAME request, so it
+# is paid for twice on every activation for the rest of the run. Unbounded, a
+# 100 KB goal is ~50k input tokens per wake-up against a ~$0.000064 baseline
+# (config.py) — a ~100x multiplier that trips RUN_COST_CAP_USD in ~100
+# activations and reports nothing but `cost_cap_exceeded`, with no hint of
+# the cause. Message bodies inlined by the digest have the same shape, one
+# order of magnitude smaller.
+#
+# The request models bound these at the API boundary; this is the defensive
+# half, so a run created by a script, an older payload or a hand-edited
+# snapshot cannot break the "prompt size is bounded, not growing" invariant
+# either. Limits sit above anything well-behaved — the longest message across
+# the 24 saved runs is 546 chars, so 600 leaves every real transcript
+# byte-identical.
+ADMIN_GOAL_PROMPT_LIMIT = 2000
+DIGEST_BODY_LIMIT = 600
+
+
+def _clamp(text: str, limit: int) -> str:
+    """Trim `text` and cut it to `limit` characters, marking the cut."""
+    t = (text or "").strip()
+    return t if len(t) <= limit else t[:limit] + "…"
+
+
 async def build_system_prompt(state: RunState, agent: Agent) -> str:
     """Assemble the system prompt from SOUL + MEMORY plus minimal rules.
 
@@ -38,8 +65,24 @@ async def build_system_prompt(state: RunState, agent: Agent) -> str:
         await memory.read_memory(state, p.id), MEMORY_DAYS_IN_PROMPT
     )
 
+    # The building is data, not code. Hardcoding "Condominio Via Garibaldi, a
+    # Milano" here contradicted the authoring contract (write the four files,
+    # change no Python) and, worse, could drift from what the agent's phone
+    # actually shows: `_resolve_chat` matches on the chat's display name, so
+    # renaming the main chat left the resident being told to write in a group
+    # that isn't on their phone — and burning one of three tool steps finding
+    # that out. The run's own chat list is the authority; building.json is
+    # only the fallback for a state with no main chat at all.
+    config_name, city = building.building_scene(state.building_id)
+    group_name = next(
+        (c.display_name for c in state.chats if c.kind == "main"), ""
+    ) or config_name
+    where = f"{p.unit} del {group_name}" if group_name else p.unit
+    if city:
+        where += f", a {city}"
+
     lines = [
-        f"Sei {p.display_name}. Vivi in {p.unit} del Condominio Via Garibaldi, a Milano.",
+        f"Sei {p.display_name}. Vivi in {where}.",
         "",
         "Quello che segue sono i tuoi appunti su chi sei. Li hai scritti tu, "
         "tempo fa, per ricordarti come sei fatto/a:",
@@ -54,8 +97,10 @@ async def build_system_prompt(state: RunState, agent: Agent) -> str:
     ]
 
     # Admin-authored goal is framed as an organic new preoccupation on the
-    # agent's mind, never as an external directive.
-    extra = (getattr(agent, "admin_goal", "") or "").strip()
+    # agent's mind, never as an external directive. Clamped: see
+    # ADMIN_GOAL_PROMPT_LIMIT — this text is re-sent twice per activation for
+    # the whole run.
+    extra = _clamp(getattr(agent, "admin_goal", "") or "", ADMIN_GOAL_PROMPT_LIMIT)
     if extra:
         lines.extend([
             "",
@@ -66,7 +111,7 @@ async def build_system_prompt(state: RunState, agent: Agent) -> str:
     lines.extend([
         "",
         "Il tuo telefono:",
-        "- Hai il gruppo condominiale \"Condominio Via Garibaldi\" dove scrivono tutti i vicini e l'amministratore, più le chat private con i singoli vicini o con l'amministratore.",
+        f"- Hai il gruppo condominiale \"{group_name}\" dove scrivono tutti i vicini e l'amministratore, più le chat private con i singoli vicini o con l'amministratore.",
         "- Per scrivere, leggere, prenderti un appunto, usa le azioni del telefono. Parlare soltanto tra sé e sé non mette niente in chat — per dire qualcosa devi usare il telefono.",
         "- Se c'è qualcosa da decidere formalmente (una spesa, una regola comune, cambiare amministratore), puoi depositare una mozione dal telefono e farla votare. Ma solo se vale davvero la pena.",
         "- Se un vicino dice una cosa ovvia, scontata o con cui sei semplicemente d'accordo, puoi usare una reazione emoji (👍 ❤️ 😂 🙄 😡) invece di scrivere un altro messaggio. Risparmi parole e dici la stessa cosa.",
@@ -153,9 +198,7 @@ def build_notification_prompt(
         if owed_msg is not None:
             current_day = state.clock.day
             when = _fmt_when(owed_msg.day, current_day, owed_msg.fictional_timestamp_minutes)
-            preview = owed_msg.content.strip().replace("\n", " ")
-            if len(preview) > 320:
-                preview = preview[:320] + "…"
+            preview = _clamp(owed_msg.content.replace("\n", " "), 320)
             parts.extend([
                 "",
                 f"L'amministratore ha scritto {when} e tu non hai ancora reagito.",
@@ -181,7 +224,9 @@ def build_notification_prompt(
     # An admin-set goal is the most steerable lever during play. Surface it
     # here (fresh every activation) in addition to the system prompt — same
     # first-person, "questa cosa ti gira in testa" framing, not a directive.
-    extra = (getattr(agent, "admin_goal", "") or "").strip()
+    # This is the second of the two sinks that ship in one request, so the
+    # clamp has to be here too, not only in build_system_prompt.
+    extra = _clamp(getattr(agent, "admin_goal", "") or "", ADMIN_GOAL_PROMPT_LIMIT)
     if extra:
         parts.extend([
             "",
@@ -344,6 +389,11 @@ def _latest_unanswered_admin_in_main(state: RunState, agent: Agent, now: int) ->
             continue
         if m.sender_kind == "resident" or m.sender_id == aid:
             continue
+        # A vote tally is stamped "admin" but is nobody speaking. Quoting it
+        # back as "Cosa ha detto, parole sue" and demanding a verbal reply
+        # asks the resident to answer a scoreboard.
+        if m.bookkeeping:
+            continue
         if m.fictional_timestamp_minutes > now:
             continue
         if candidate is None or timeline.sort_key(m) > timeline.sort_key(candidate):
@@ -412,8 +462,7 @@ def _thread_status(ctx: ToolContext, agent: Agent) -> str:
         by_chat.setdefault(m.chat_id, []).append(m)
 
     def trim(text: str, n: int = 140) -> str:
-        t = text.strip().replace("\n", " ")
-        return t if len(t) <= n else t[:n] + "…"
+        return _clamp(text.replace("\n", " "), n)
 
     # Admin-DM-awaiting-reply blocks go at the front — these are the highest
     # priority threads. Suppresses the silently-ignored-by-_thread_status
@@ -596,10 +645,7 @@ async def activate_agent(
             # So: nudge once and let them try again. Only once, and only if
             # nothing has landed yet — a model that already sent something and
             # then adds a closing remark is genuinely finished.
-            produced_so_far = (
-                len(ctx.sent_messages_this_activation)
-                + len(ctx.reactions_added_this_activation)
-            )
+            produced_so_far = ctx.landed_output_count()
             if not nudged_no_tool and produced_so_far == 0 and step + 1 < MAX_TOOL_CALLS_PER_ACTIVATION:
                 nudged_no_tool = True
                 log("agent", f"{agent_id} step{step} no tool_calls, nudging once "
@@ -627,10 +673,7 @@ async def activate_agent(
             "content": content,
             "tool_calls": tool_calls,
         })
-        produced_before = (
-            len(ctx.sent_messages_this_activation)
-            + len(ctx.reactions_added_this_activation)
-        )
+        produced_before = ctx.landed_output_count()
         for tc in tool_calls:
             fn = tc.get("function", {})
             name = fn.get("name", "")
@@ -640,8 +683,17 @@ async def activate_agent(
             except json.JSONDecodeError:
                 args = {}
             result = dispatch_tool(ctx, name, args)
-            args_preview = json.dumps(args, ensure_ascii=False)[:80]
-            log("agent", f"{agent_id} tool={name} args={args_preview} -> {result[:80]!r}")
+            # Never put chat content in the log line. This used to print 80
+            # chars of the outgoing message body plus 80 of the tool's reply,
+            # and the ring buffer behind it is served by /api/debug/logs,
+            # which is reachable without a session in open-beta mode. The
+            # shape — which tool, how much text, how long an answer — is what
+            # you actually read back when reconstructing an activation.
+            arg_shape = " ".join(
+                f"{k}={len(v)}ch" if isinstance(v, str) else f"{k}={type(v).__name__}"
+                for k, v in sorted(args.items())
+            )
+            log("agent", f"{agent_id} tool={name} {arg_shape} -> {len(result)}ch")
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
@@ -661,10 +713,15 @@ async def activate_agent(
         # refused by containment or the DM cooldown produces nothing, so the
         # loop continues and the model can rewrite or bow out. That keeps the
         # acknowledgment guarantee intact.
-        produced_after = (
-            len(ctx.sent_messages_this_activation)
-            + len(ctx.reactions_added_this_activation)
-        )
+        #
+        # `landed_output_count` is the same predicate the scheduler uses to
+        # decide whether the admin was acknowledged, which is the point: when
+        # implicit-done counted a 👍 under force and the scheduler did not,
+        # the turn was cut with two of three steps unused and the agent was
+        # then re-forced every remaining round. Now a forced agent who only
+        # reacts keeps their steps and can still write words in this same
+        # activation.
+        produced_after = ctx.landed_output_count()
         if produced_after > produced_before:
             log("agent", f"{agent_id} step{step} produced output, implicit done")
             ctx.done = True
@@ -695,7 +752,9 @@ def build_context_digest(ctx: ToolContext, agent: Agent) -> str:
     activations.
 
     Volume is bounded: the group chat gets the last MAIN_CHAT_CONTEXT
-    messages, each DM the last DM_CONTEXT.
+    messages, each DM the last DM_CONTEXT, and each body is cut at
+    DIGEST_BODY_LIMIT. A message count on its own is not a bound — one
+    admin announcement can carry as much text as the whole rest of the day.
     """
     state = ctx.state
     aid = agent.persona.id
@@ -729,7 +788,7 @@ def build_context_digest(ctx: ToolContext, agent: Agent) -> str:
             when = _fmt_when(m.day, current_day, m.fictional_timestamp_minutes)
             who = "tu" if m.sender_id == aid else m.sender_display_name
             marker = "› " if (i >= first_unread and m.sender_id != aid) else "  "
-            body = m.content.strip().replace("\n", " ")
+            body = _clamp(m.content.replace("\n", " "), DIGEST_BODY_LIMIT)
             reacts = "".join(
                 f" {emoji}×{len(ids)}" if len(ids) > 1 else f" {emoji}"
                 for emoji, ids in (m.reactions or {}).items() if ids

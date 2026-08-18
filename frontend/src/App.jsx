@@ -16,6 +16,11 @@ const REAL_MS_PER_FIC_MIN = 300;
 const MIN_RENDER_GAP_MS = 1400;
 const MAX_RENDER_GAP_MS = 6500;
 const AUTO_ADVANCE_DELAY_MS = 1200;
+// How long to wait before re-arming the advance chain after a 429. The
+// backend's per-IP window is a minute, so this only has to outlast a short
+// burst — long enough to stop hammering, short enough that the run resumes
+// on its own instead of needing a reload.
+const RATE_LIMIT_RETRY_MS = 15000;
 
 // Hard ceiling on how far behind the server the render queue may fall.
 // Without it the queue is unbounded: a busy day emits ~15 messages, each
@@ -59,7 +64,22 @@ function compareMessages(a, b) {
 }
 
 function mergeMessagesChronologically(existing, incoming) {
-  const byId = new Map((existing || []).map(m => [m.id, m]));
+  const byId = new Map();
+  for (const m of existing || []) {
+    if (m?.isNew) {
+      // `isNew` is a one-shot flag: it exists only to play the arrival
+      // animation once, on the bubble that just landed. An object spread can
+      // add keys but never remove them, so a message flagged when it arrived
+      // would stay flagged for the rest of the run — and the next time the
+      // list mounts (any chat switch) every flagged bubble would replay the
+      // animation simultaneously. Every merge clears it; only the payload
+      // being merged in is allowed to set it.
+      const { isNew, ...rest } = m;
+      byId.set(m.id, rest);
+    } else {
+      byId.set(m.id, m);
+    }
+  }
   for (const msg of incoming || []) {
     if (!msg?.id) continue;
     byId.set(msg.id, { ...(byId.get(msg.id) || {}), ...msg });
@@ -1314,7 +1334,7 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, queuedBy
             return (
               <div
                 key={m.id}
-                className={`msg-row ${kindClass} ${sameAsPrev ? 'grouped' : ''} ${m.isNew ? 'fade-in' : ''}`}
+                className={`msg-row ${kindClass} ${sameAsPrev ? 'grouped' : ''}`}
               >
                 {!isSelf && (
                   <div className="msg-avatar-slot">
@@ -1327,7 +1347,11 @@ function ChatColumn({ state, selectedChatId, pendingChat, typingByChat, queuedBy
                     )}
                   </div>
                 )}
-                <div className={`msg ${kindClass} ${reactionEntries.length ? 'has-reactions' : ''}`}>
+                {/* fade-in belongs on the bubble, not the row: the only
+                    stylesheet rule is `.msg.fade-in` (App.css), and the row
+                    is also the avatar gutter — animating it would slide the
+                    portrait too. */}
+                <div className={`msg ${kindClass} ${reactionEntries.length ? 'has-reactions' : ''} ${m.isNew ? 'fade-in' : ''}`}>
                   {!sameAsPrev && !isSelf && (
                     <div className="sender">{m.sender_display_name}</div>
                   )}
@@ -1664,13 +1688,22 @@ export default function App() {
   // breathe — instead of pacing every message at a fixed cadence.
   const nextRenderSlotRef = useRef(0);
   const lastRenderedFicMinRef = useRef(null);
-  const renderTimersRef = useRef(new Set());
+  // message id -> { timerId, payload }. Keyed rather than a bare Set of timer
+  // ids so the queue has an identity: we can flush it (render everything still
+  // waiting, in order) instead of only being able to cancel it. Map iteration
+  // is insertion order, and renderAt is monotonic, so insertion order IS queue
+  // order.
+  const renderTimersRef = useRef(new Map());
+  // Every message id we have already accepted from the stream. The SSE bus
+  // replays its recent buffer on every (re)connect and `onVisibility`
+  // reconnects on any tab refocus, so duplicates are routine, not exotic.
+  const seenMessageIdsRef = useRef(new Set());
   const queuedMessagesRef = useRef([]);
   useEffect(() => { queuedMessagesRef.current = queuedMessages; }, [queuedMessages]);
 
   useEffect(() => {
     return () => {
-      for (const id of renderTimersRef.current) clearTimeout(id);
+      for (const entry of renderTimersRef.current.values()) clearTimeout(entry.timerId);
       renderTimersRef.current.clear();
     };
   }, [state?.run_id]);
@@ -1679,7 +1712,19 @@ export default function App() {
     setQueuedMessages([]);
     nextRenderSlotRef.current = 0;
     lastRenderedFicMinRef.current = null;
+    seenMessageIdsRef.current.clear();
   }, [state?.run_id]);
+
+  // Anything already in state counts as seen, not just what arrived through
+  // this component's own stream. The handler's own bookkeeping only covers
+  // reconnects within one page session; a refresh mid-day loads the whole
+  // transcript via getRun and *then* opens the stream, which replays up to
+  // 60s / 200 events for ids that are already on screen. Declared after the
+  // reset above so a run switch clears first and re-seeds from the new run.
+  useEffect(() => {
+    if (!state?.messages) return;
+    for (const m of state.messages) seenMessageIdsRef.current.add(m.id);
+  }, [state?.messages]);
 
   // Watchdog: while a day is in progress, poll the API every 5s and merge
   // anything we don't yet have. SSE is the fast path, but it dies silently
@@ -1856,6 +1901,18 @@ export default function App() {
     const runId = state.run_id;
     let es = null;
 
+    // Reconnect backoff. The old retry was a flat 1s with the timer id
+    // thrown away — fine for a transient drop, but a stream that fails
+    // *deterministically* (DISABLED=1 → 503, expired session → 401) closes
+    // the socket the instant it opens, so the retry became a 1 Hz hammer on
+    // the dyno for as long as the tab stayed open. Doubling and capping at
+    // 30s is the part that pays; holding the id so cleanup can cancel it
+    // closes a narrow leak on unmount.
+    const RECONNECT_MIN_MS = 1000;
+    const RECONNECT_MAX_MS = 30000;
+    let reconnectDelayMs = RECONNECT_MIN_MS;
+    let reconnectTimer = null;
+
     // Refetch the run and merge any messages we missed. Called both on
     // every SSE (re)open and whenever the tab regains visibility.
     const refetchAndMerge = () => {
@@ -1899,11 +1956,39 @@ export default function App() {
       }
     };
 
+    // Render everything still waiting in the pacing queue, right now, in the
+    // order it was queued, and reset the pacing clock.
+    //
+    // Called when the admin's own message arrives. `timeline.allocate_minute`
+    // guarantees an admin send is stamped after every message already in the
+    // run, so anything still sitting in the queue belongs ABOVE the admin
+    // bubble — and the admin branch renders instantly. Without the flush the
+    // admin's line appears first and residents pop in above it for up to
+    // MAX_QUEUE_LAG_MS. Nothing already on screen moves (compareMessages is a
+    // total order and only ever inserts), but "puoi scrivere quando vuoi"
+    // makes typing mid-burst a first-class action, so it happens often.
+    const flushRenderQueue = () => {
+      const pending = Array.from(renderTimersRef.current.values());
+      renderTimersRef.current.clear();
+      for (const entry of pending) {
+        clearTimeout(entry.timerId);
+        renderIncomingMessage(entry.payload);
+      }
+      nextRenderSlotRef.current = 0;
+    };
+
     // Wire all listeners onto a fresh EventSource. We close+recreate (vs.
     // letting the browser auto-reconnect) on visibilitychange and on hard
     // errors, because mobile Safari's native auto-reconnect is unreliable
     // — readyState often stays OPEN on a dead socket after sleep/wake.
     const connect = () => {
+      // onVisibility calls connect() directly, so a pending retry may be
+      // outstanding; let it go rather than have it close the socket we are
+      // about to open.
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       if (es) es.close();
       es = new EventSource(`${BACKEND}/api/runs/${runId}/events`);
 
@@ -1919,14 +2004,30 @@ export default function App() {
       // missed while disconnected.
       es.addEventListener('open', () => {
         lastEventAtRef.current = Date.now();
+        // A stream that actually opened is not the failure the backoff is
+        // for, so give the next drop a fast first retry again.
+        reconnectDelayMs = RECONNECT_MIN_MS;
         refetchAndMerge();
       });
 
       on('message_sent', (e) => {
         const payload = JSON.parse(e.data).data;
         const msg = payload.message;
-        // Admin's own send: render instantly (their action, no need to pace).
+        // Drop replays before touching anything. renderIncomingMessage does
+        // dedupe, but only inside its setState — which for a queued message is
+        // up to MAX_QUEUE_LAG_MS away, long after nextRenderSlotRef,
+        // lastRenderedFicMinRef and the "in arrivo" list have been advanced.
+        // On a replay every ficDelta is 0, so each already-rendered message
+        // still books MIN_RENDER_GAP_MS of queue: a phantom "N messaggi in
+        // arrivo…" for messages the player is already reading, and the next
+        // genuinely new message held back the full 7s.
+        if (!msg?.id || seenMessageIdsRef.current.has(msg.id)) return;
+        seenMessageIdsRef.current.add(msg.id);
+        // Admin's own send: render instantly (their action, no need to pace),
+        // but only after the queue behind it has been drained — see
+        // flushRenderQueue.
         if (msg.sender_kind === 'admin') {
+          flushRenderQueue();
           lastRenderedFicMinRef.current = msg.fictional_timestamp_minutes;
           renderIncomingMessage(payload);
           return;
@@ -1976,10 +2077,10 @@ export default function App() {
             }];
           });
           const timerId = setTimeout(() => {
-            renderTimersRef.current.delete(timerId);
+            renderTimersRef.current.delete(msg.id);
             renderIncomingMessage(payload);
           }, delay);
-          renderTimersRef.current.add(timerId);
+          renderTimersRef.current.set(msg.id, { timerId, payload });
         }
       });
 
@@ -2070,6 +2171,12 @@ export default function App() {
       });
 
       on('motion_closed', (e) => {
+        // The event carries the closed motion in full, and the trust deltas
+        // the close produced arrive on their own `trust_updated` event — so
+        // there is nothing left for a refetch to bring back. It used to pull
+        // the whole ~150 KB run, which made a single close cost two full
+        // snapshot reads back-to-back. The tally message the backend posts
+        // alongside comes in over `message_sent` like any other.
         const d = JSON.parse(e.data).data;
         setState(prev => {
           if (!prev) return prev;
@@ -2078,17 +2185,6 @@ export default function App() {
             motions: (prev.motions || []).map(m => m.id === d.motion.id ? d.motion : m),
           };
         });
-        // Pull fresh state (trust matrix + dials updated server-side)
-        api.getRun(runId).then(fresh => {
-          setState(prev => {
-            if (!prev) return fresh;
-            const queuedIds = new Set(queuedMessagesRef.current.map(q => q.id));
-            const visibleFresh = fresh.messages.filter(m =>
-              !queuedIds.has(m.id) || prev.messages.some(pm => pm.id === m.id)
-            );
-            return { ...fresh, messages: mergeMessagesChronologically(prev.messages, visibleFresh) };
-          });
-        }).catch(() => {});
       });
 
       on('reaction_added', (e) => {
@@ -2108,11 +2204,41 @@ export default function App() {
         setMemoryRefreshSeq(n => n + 1);
       });
 
-      on('trust_updated', () => {
-        // Re-fetch run for the authoritative trust matrix
-        api.getRun(runId).then(fresh => {
-          setState(prev => prev ? { ...prev, trust: fresh.trust } : prev);
-        }).catch(() => {});
+      on('trust_updated', (e) => {
+        // Apply the published deltas in place. This used to refetch the whole
+        // run to copy ~25 floats: a saved run is ~150 KB, trust fires 5-7×
+        // per fictional day, and each refetch is a full jsonb read plus a
+        // pydantic serialize on the same Eco dyno that is running the day
+        // loop — ~1 MB/day for every connected browser, to move numbers the
+        // event already carries. The day_done handler still refetches
+        // authoritatively, so an in-place value can be stale for at most one
+        // day and can never drift permanently.
+        const d = JSON.parse(e.data).data;
+        const deltas = d?.deltas || [];
+        if (deltas.length === 0) return;
+        setState(prev => {
+          if (!prev) return prev;
+          const trust = { ...(prev.trust || {}) };
+          const bump = (from, to, delta) => {
+            const row = { ...(trust[from] || {}) };
+            // Same clamp as dials._update. Without it a long run of
+            // like-signed deltas would display a value the backend never
+            // actually holds.
+            row[to] = Math.max(-1, Math.min(1, (row[to] ?? 0) + delta));
+            trust[from] = row;
+          };
+          for (const x of deltas) {
+            if (!x?.from || !x?.to || typeof x.delta !== 'number') continue;
+            bump(x.from, x.to, x.delta);
+            // Vote alignment is symmetric by construction:
+            // dials.apply_trust_from_votes calls _update in BOTH directions
+            // but publishes one entry per pair. Every other signal
+            // (reaction, forward, dm_reply, attack) is one-directional, so
+            // mirroring is scoped to the motion group.
+            if (d.cause_group === 'motion') bump(x.to, x.from, x.delta);
+          }
+          return { ...prev, trust };
+        });
       });
 
       es.addEventListener('error', (e) => {
@@ -2125,7 +2251,13 @@ export default function App() {
         // don't sit on a dead stream.
         console.warn('EventSource error', err);
         if (es && es.readyState === 2 /* CLOSED */) {
-          setTimeout(connect, 1000);
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          const delay = reconnectDelayMs;
+          reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_MS);
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, delay);
         }
       };
     };
@@ -2146,6 +2278,7 @@ export default function App() {
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (es) es.close();
     };
   }, [state?.run_id]);
@@ -2183,6 +2316,15 @@ export default function App() {
       // day_done SSE was missed. Treat it as a no-op — the active day will
       // publish day_done on completion and chain the next advance.
       if (e?.status === 409) return;
+      // 429 is the per-IP rate limiter, not a refusal of the day itself.
+      // Backing off and re-arming keeps the chain alive; the fatal branch
+      // below would stop it permanently, and there is no manual advance
+      // button to restart it.
+      if (e?.status === 429) {
+        setWorking(false);
+        if (!pausedRef.current) setNextAdvanceAt(Date.now() + RATE_LIMIT_RETRY_MS);
+        return;
+      }
       setDayError('Errore: ' + String(e));
       setWorking(false);
     }

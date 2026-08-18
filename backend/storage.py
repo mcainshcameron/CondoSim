@@ -56,6 +56,27 @@ async def save_run(state: RunState) -> None:
             )
 
 
+async def run_exists(run_id: str) -> bool:
+    """Cheap "is this a real run id?" probe.
+
+    Exists so the API can 404 an unknown id *before* touching any of the
+    `defaultdict`s keyed by run id (`_state_locks` here, `_subscribers` /
+    `_recent` / `_run_locks` in events.py) — reading one of those with a
+    garbage id mints an entry that is never evicted. The mutating endpoints
+    can't just call `load_run` first, because they have to hold
+    `state_lock(run_id)` *around* the load (see `_get_run_for_mutation`).
+
+    Deliberately not `load_run(...) is not None`: this never deserializes the
+    run, so the extra round trip stays cheap enough to sit in front of every
+    admin action.
+    """
+    if not has_database():
+        return run_id in _MEM_RUNS
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow("select 1 from runs where run_id = $1", run_id)
+    return row is not None
+
+
 async def load_run(run_id: str) -> RunState | None:
     if not has_database():
         payload = _MEM_RUNS.get(run_id)

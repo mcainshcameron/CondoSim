@@ -11,7 +11,7 @@ You play the *amministratore* — the building administrator. You announce the
 crisis, advance time day by day, and watch the residents react in a
 WhatsApp-style chat.
 
-**Live demo:** https://condosim-beta-5cebaf6a72dc.herokuapp.com/
+
 
 ---
 
